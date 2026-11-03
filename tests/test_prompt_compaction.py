@@ -38,13 +38,23 @@ def test_react_goal_is_not_duplicated_in_system_context():
     ) == 1
 
 
-def test_mcp_prompt_keeps_exact_call_and_confirmation(monkeypatch):
-    monkeypatch.setattr(
-        mcp_chat.mcp_registry, "format_tools_summary", lambda _tools: "lookup"
-    )
-    prompt = mcp_chat._tool_prompt([{"name": "lookup"}])
-    assert len(prompt) < 450
+def test_mcp_prompt_keeps_exact_call_schema_and_confirmation():
+    tools = [{
+        "server_id": "rmcp",
+        "name": "search_mcp_servers",
+        "description": "Search connected MCP servers",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"query": {"type": "string"}},
+            "required": ["query"],
+        },
+    }]
+    prompt = mcp_chat._tool_prompt(tools)
+    assert len(prompt) < 700
     assert '"action":"mcp_call"' in prompt
     assert '"server_id"' in prompt and '"arguments"' in prompt
+    assert "rmcp/search_mcp_servers" in prompt
+    assert '"required":["query"]' in prompt
     assert "не спрашивай server_id" in prompt
+    assert "недоверенные данные" in prompt
     assert "подтверждение" in prompt
