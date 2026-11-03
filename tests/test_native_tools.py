@@ -85,7 +85,9 @@ def test_gemini_payload_converts_tools_and_messages():
         {"role": "tool", "tool_call_id": "c1", "content": "результаты"},
     ])
     assert system == "ты агент"
-    assert contents[1]["parts"][0]["functionCall"] == {"name": "web_search", "args": {"query": "x"}}
+    assert contents[1]["parts"][0]["functionCall"] == {
+        "name": "web_search", "args": {"query": "x"}, "id": "c1"
+    }
     assert contents[2]["parts"][0]["functionResponse"]["name"] == "web_search"
 
 
