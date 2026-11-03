@@ -10,8 +10,9 @@ provider_manager.py — единый Provider Manager NovaMind.
   exponential backoff с jitter;
 * конечное число попыток: без бесконечных повторов и циклических
   переключений, временно заблокированные ключи не используются повторно;
-* если все ключи провайдера недоступны — автоматический переход к
-  следующему совместимому провайдеру;
+* ограниченная ротация ключей внутри выбранного провайдера;
+* отдельный execute_with_failover helper существует для явных сценариев,
+  но обычный чат не переключает выбранные провайдер или модель;
 * структурированные логи (провайдер, модель, номер ключа без самого
   ключа, причина ошибки, время cooldown, результат переключения);
 * ключи никогда не попадают в логи и ответы — только номер ключа.
@@ -51,7 +52,7 @@ class ErrorKind(str, enum.Enum):
 
 # kind → (повторять ли на другом ключе, fatal для ключа)
 _KIND_POLICY = {
-    ErrorKind.AUTH: (False, True),        # ключ плохой — не тянем остальные
+    ErrorKind.AUTH: (True, True),         # пробуем следующий ключ; отключаем после порога 401
     ErrorKind.FORBIDDEN: (False, False),  # запрет не лечится сменой ключа
     ErrorKind.NOT_FOUND: (False, False),  # модель не та — ключ ни при чём
     ErrorKind.RATE_LIMIT: (True, False),  # пробуем другой ключ
@@ -248,7 +249,7 @@ class ProviderEntry:
 
 
 class ProviderManager:
-    """Единый менеджер провайдеров и ключей с ротацией и failover."""
+    """Единый реестр провайдеров с ограниченной ротацией ключей."""
 
     def __init__(self, sleep=time.sleep, now=time.time):
         self._providers: dict[str, ProviderEntry] = {}
@@ -451,9 +452,16 @@ class ProviderManager:
 
 # ---------- Общий реестр по умолчанию (заполняется из окружения) ----------
 def _env_keys(*names):
-    """Непустые значения переменных окружения (в порядке имён)."""
+    """Collect base and numbered provider keys in stable, de-duplicated order."""
     import os
-    return [os.getenv(name, "").strip() for name in names if os.getenv(name, "").strip()]
+    values = []
+    for name in names:
+        candidates = [name, *(f"{name}_{index}" for index in range(1, 10))]
+        for candidate in candidates:
+            value = os.getenv(candidate, "").strip()
+            if value and value not in values:
+                values.append(value)
+    return values
 
 
 def default_manager():

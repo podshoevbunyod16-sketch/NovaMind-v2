@@ -185,10 +185,12 @@ def test_default_manager_registers_all_env_providers(monkeypatch):
     monkeypatch.setenv("GROQ_API_KEY_2", "g2")
     monkeypatch.setenv("CEREBRAS_API_KEY", "c1")
     monkeypatch.setenv("GEMINI_API_KEY", "gm1")
+    monkeypatch.setenv("CEREBRAS_API_KEY_1", "c2")
     manager = pm.default_manager()
     names = manager.provider_names()
     assert {"groq", "cerebras", "google_ai_studio"} <= set(names)
     assert len(manager.status()["groq"]["keys"]) == 2
+    assert len(manager.status()["cerebras"]["keys"]) == 2
     assert "g1" not in str(manager.status())
 
 
@@ -206,22 +208,56 @@ def test_ai_providers_failover_skips_provider_with_all_keys_in_cooldown(monkeypa
     assert all(p != "groq" for p, _m in targets)
 
 
-def test_ai_providers_marks_pm_failure_on_transport_error(monkeypatch):
+def test_ai_providers_rotate_keys_inside_selected_provider(monkeypatch):
     import ai_providers
     manager = pm.ProviderManager(sleep=lambda s: None)
-    manager.register_provider("cerebras", keys=["c1"])
+    manager.register_provider("cerebras", keys=["c1", "c2"])
     monkeypatch.setattr(ai_providers, "_PM", manager)
     monkeypatch.setattr(ai_providers, "resolve_target", lambda *a, **k: (
-        "cerebras", "m", {"url": "https://api.cerebras.ai/v1/chat/completions", "max_tokens": 8}))
-    monkeypatch.setattr(ai_providers, "openai_compatible_request",
-                        lambda *a, **k: (None, "Сервер вернул HTTP 429: rate limit"))
+        "cerebras", "selected-model", {"url": "https://api.cerebras.ai/v1/chat/completions", "max_tokens": 8}))
     monkeypatch.setattr(ai_providers, "provider_headers", lambda p: {})
+    seen = []
+    def fake_request(_url, _payload, headers, **_kwargs):
+        seen.append(headers.get("Authorization"))
+        if headers.get("Authorization") == "Bearer c1":
+            return None, "Cerebras HTTP 429: rate limit"
+        return {"choices": [{"message": {"content": "ok"}}]}, None
+    monkeypatch.setattr(ai_providers, "openai_compatible_request", fake_request)
+
     text, meta = ai_providers._chat_completion_once([{"role": "user", "content": "hi"}])
-    assert text is None
-    key = manager.status()["cerebras"]["keys"][0]
-    assert key["invalid"] is False               # 429 → cooldown, а не permanent disable
-    assert key["cooldown_remaining_sec"] > 0      # ключ временно заблокирован
-    assert key["last_error"] == "rate_limit"
+
+    assert text == "ok"
+    assert seen == ["Bearer c1", "Bearer c2"]
+    assert meta["provider"] == "cerebras" and meta["model"] == "selected-model"
+    status = manager.status()["cerebras"]["keys"]
+    assert status[0]["last_error"] == "rate_limit"
+    assert status[1]["last_error"] == ""
+
+
+def test_ai_providers_gemini_request_rotates_same_provider_keys(monkeypatch):
+    import ai_providers
+    manager = pm.ProviderManager(sleep=lambda s: None)
+    manager.register_provider("google_ai_studio", keys=["g1", "g2"])
+    monkeypatch.setattr(ai_providers, "_PM", manager)
+    seen = []
+    class Response:
+        headers = {}
+        text = "rate limit"
+        def __init__(self, status): self.status_code = status
+        def json(self): return {"candidates": [{"content": {"parts": [{"text": "Gemini OK"}]}}]}
+    def fake_post(_url, json=None, headers=None, timeout=None, **_kwargs):
+        key = headers["x-goog-api-key"]
+        seen.append(key)
+        return Response(429 if key == "g1" else 200)
+    monkeypatch.setattr(ai_providers.requests, "post", fake_post)
+
+    data, error = ai_providers.gemini_request("gemini-3.8-flash", {
+        "messages": [{"role": "user", "content": "hi"}], "max_tokens": 32
+    })
+
+    assert error is None
+    assert data["choices"][0]["message"]["content"] == "Gemini OK"
+    assert seen == ["g1", "g2"]
 
 
 
@@ -229,3 +265,47 @@ def test_default_manager_tracks_current_gemini_model_id(monkeypatch):
     monkeypatch.setenv("GEMINI_API_KEY", "test-key")
     manager = pm.default_manager()
     assert manager.status()["google_ai_studio"]["models"] == ["gemini-3.8-flash"]
+
+
+
+def test_execute_rotates_after_auth_failure_to_another_key():
+    manager = pm.ProviderManager(sleep=lambda _seconds: None)
+    manager.register_provider("cerebras", keys=["bad", "good"])
+    seen = []
+    def request_fn(key):
+        seen.append(key.key)
+        if key.key == "bad":
+            raise pm.ProviderError(pm.ErrorKind.AUTH, "401 rejected")
+        return "ok"
+
+    result, error = manager.execute("cerebras", "selected-model", request_fn)
+
+    assert result == "ok" and error is None
+    assert seen == ["bad", "good"]
+
+
+
+def test_openai_compatible_stream_rotates_keys_before_opening_stream(monkeypatch):
+    import ai_providers
+    manager = pm.ProviderManager(sleep=lambda _seconds: None)
+    manager.register_provider("cerebras", keys=["stream-bad", "stream-good"])
+    monkeypatch.setattr(ai_providers, "_PM", manager)
+    seen = []
+    class Response:
+        headers = {}
+        encoding = None
+        def __init__(self, status): self.status_code = status; self.text = "rate limited"
+        def close(self): pass
+    responses = iter([Response(429), Response(200)])
+    def fake_post(_url, json=None, headers=None, timeout=None, stream=None):
+        seen.append(headers["Authorization"])
+        return next(responses)
+    monkeypatch.setattr(ai_providers.requests, "post", fake_post)
+
+    response, error = ai_providers._managed_stream_request(
+        "cerebras", "selected-model", "https://api.cerebras.ai/v1/chat/completions",
+        {"model": "selected-model"}, {}, 30)
+
+    assert error is None and response is not None
+    assert seen == ["Bearer stream-bad", "Bearer stream-good"]
+    assert response._novamind_key_index == 1
