@@ -149,6 +149,7 @@ PROVIDERS = {
             "X-Title": "NovaMind AI",
         },
         "models": [
+            {"id": "openrouter/free", "name": "OpenRouter Free Models Router", "free": True},
             {"id": "google/gemini-2.0-flash-exp:free", "name": "Gemini 2.0 Flash (Free)", "free": True},
             {"id": "deepseek/deepseek-chat-v3-0324:free", "name": "DeepSeek Chat V3 (Free)", "free": True},
         ]
@@ -160,9 +161,7 @@ PROVIDERS = {
             "Content-Type": "application/json"
         },
         "models": [
-            {"id": "gemini-2.0-flash", "name": "Gemini 2.0 Flash (free tier)", "free": True},
-            {"id": "gemini-2.0-flash-lite", "name": "Gemini 2.0 Flash Lite (free tier)", "free": True},
-            {"id": "gemini-1.5-flash", "name": "Gemini 1.5 Flash (free tier)", "free": True},
+            {"id": "gemini-3.8-flash", "name": "Gemini 3.8 Flash (free tier)", "free": True},
         ]
     },
     "pollinations": {
@@ -265,6 +264,11 @@ def load_runtime_settings():
                 "qwen/qwen3.6-27b",
             }:
                 current_model = "openai/gpt-oss-120b"
+            if (current_provider == "google_ai_studio"
+                    and str(current_model).removeprefix("models/") in {
+                        "gemini-2.0-flash", "gemini-2.0-flash-lite", "gemini-1.5-flash"
+                    }):
+                current_model = "gemini-3.8-flash"
             system_prompt    = s.get("system_prompt", system_prompt)
             saved_media = s.get("media_selection")
             media_selection = saved_media if isinstance(saved_media, dict) else {}

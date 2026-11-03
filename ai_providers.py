@@ -222,13 +222,16 @@ def gemini_messages_from_openai(messages):
                 name = str(function.get("name") or "")
                 if not name: continue
                 args, _err = _parse_tool_arguments(function.get("arguments"))
-                call_names[str(call.get("id") or name)] = name
-                parts.append({"functionCall": {"name": name, "args": args}})
+                call_id = str(call.get("id") or f"call_{len(call_names)}")
+                call_names[call_id] = name
+                parts.append({"functionCall": {"name": name, "args": args, "id": call_id}})
             if parts: contents_out.append({"role":"model","parts":parts})
         elif role=="tool":
-            name = call_names.get(str(message.get("tool_call_id") or "")) or str(message.get("name") or "tool")
-            contents_out.append({"role":"user","parts":[{"functionResponse":{
-                "name": name, "response": {"result": content}}}]})
+            tool_call_id = str(message.get("tool_call_id") or "")
+            name = call_names.get(tool_call_id) or str(message.get("name") or "tool")
+            function_response = {"name": name, "response": {"result": content},
+                                 "call_id": tool_call_id or name}
+            contents_out.append({"role": "user", "parts": [{"functionResponse": function_response}]})
         else: contents_out.append({"role":"user","parts":[{"text":content}]})
     return system_text,contents_out
 
@@ -247,13 +250,26 @@ def gemini_tools_payload(tools):
                              "parameters": parameters})
     return [{"functionDeclarations": declarations}] if declarations else []
 
+def _gemini_generation_config(model, payload):
+    """Build generation settings compatible with Gemini 3+ model contracts."""
+    model_id = str(model or "").strip().removeprefix("models/").lower()
+    generation_config = {
+        "maxOutputTokens": min(int(payload.get("max_tokens", 65536)), 65536),
+    }
+    # Gemini 3.x/4.x no longer accepts legacy sampling controls such as
+    # temperature. Keep it only for older model families.
+    if not model_id.startswith(("gemini-3", "gemini-4")):
+        generation_config["temperature"] = float(payload.get("temperature", 0.7))
+    return generation_config
+
+
 def gemini_request(model,payload,timeout=90,max_retries=2):
     key=(os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_AI_STUDIO_KEY") or "").strip()
     if not key: return None,"Google AI Studio: GEMINI_API_KEY не найден в .env"
     model_id=str(model or "").strip().removeprefix("models/")
     system_text,contents_out=gemini_messages_from_openai(payload.get("messages",[]))
     if not contents_out: return None,"Google AI Studio: отсутствует сообщение"
-    body={"contents":contents_out,"generationConfig":{"temperature":float(payload.get("temperature",0.7)),"maxOutputTokens":min(int(payload.get("max_tokens",65536)),65536)}}
+    body={"contents": contents_out, "generationConfig": _gemini_generation_config(model_id, payload)}
     if system_text: body["systemInstruction"]={"parts":[{"text":system_text}]}
     gemini_tools=gemini_tools_payload(payload.get("tools"))
     if gemini_tools:
@@ -278,7 +294,7 @@ def gemini_request(model,payload,timeout=90,max_retries=2):
                     if part.get("text"): parts.append(part["text"])
                     call = part.get("functionCall") if isinstance(part, dict) else None
                     if isinstance(call, dict) and call.get("name"):
-                        tool_calls.append({"id": f"call_{len(tool_calls)}", "type": "function",
+                        tool_calls.append({"id": str(call.get("id") or f"call_{len(tool_calls)}"), "type": "function",
                                            "function": {"name": call["name"],
                                                         "arguments": json.dumps(call.get("args") or {}, ensure_ascii=False)}})
             if not parts and not tool_calls: return None,"Google AI Studio не вернул текст"
@@ -312,10 +328,7 @@ def gemini_stream_request(model,payload,timeout=90):
 
     body={
         "contents": contents_out,
-        "generationConfig":{
-            "temperature":float(payload.get("temperature",0.7)),
-            "maxOutputTokens":min(int(payload.get("max_tokens",65536)),65536)
-        }
+        "generationConfig": _gemini_generation_config(model_id, payload)
     }
     if system_text:
         body["systemInstruction"]={"parts":[{"text":system_text}]}
@@ -573,6 +586,9 @@ def is_free_ai_model(provider: str, model: str, entry: dict | None = None) -> bo
     provider = str(provider or "").strip()
     model_id = str(model or "").strip().lower()
     item = entry if isinstance(entry, dict) else {}
+    if provider == "openrouter" and model_id == "openrouter/free":
+        # OpenRouter's dedicated router selects only currently available free models.
+        return True
     if provider == "google_ai_studio":
         # Google catalog includes paid-only Pro/preview models. Keep only the
         # explicit free-tier allowlist maintained in config.py.
@@ -1212,6 +1228,16 @@ def fetch_available_models(provider, force=False):
                     if (m.get("id") or m.get("name"))
                     and (provider != "groq" or m.get("active", True) is not False)
                 ]
+
+            # The router alias is not part of OpenRouter's ordinary model list,
+            # but is a documented free-only endpoint and must remain selectable.
+            if provider == "openrouter" and not any(
+                    item.get("id") == "openrouter/free" for item in models):
+                models.append(normalize_model({
+                    "id": "openrouter/free",
+                    "name": "OpenRouter Free Models Router",
+                    "free": True,
+                }, provider))
 
             # NovaMind text chat is free-only: paid/unknown cloud models are
             # neither shown in settings nor eligible for failover.

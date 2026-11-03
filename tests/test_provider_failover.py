@@ -80,3 +80,26 @@ def test_free_failover_targets_returns_only_selected_free_target(monkeypatch):
     monkeypatch.setattr(ai_providers, "resolve_target", lambda *a, **k: (
         "groq", "openai/gpt-oss-120b", config.PROVIDERS["groq"]))
     assert ai_providers.free_failover_targets() == [("groq", "openai/gpt-oss-120b")]
+
+
+def test_openrouter_free_router_is_allowed_without_enabling_paid_models(monkeypatch):
+    assert ai_providers.is_free_ai_model("openrouter", "openrouter/free")
+    assert "openrouter/free" in ai_providers._free_models("openrouter")
+    assert not ai_providers.is_free_ai_model("openrouter", "vendor/paid-model")
+
+
+def test_openrouter_free_router_executes_only_selected_model(monkeypatch):
+    monkeypatch.setattr(ai_providers, "resolve_target", lambda *a, **k: (
+        "openrouter", "openrouter/free", config.PROVIDERS["openrouter"]))
+    calls = []
+
+    def fake_once(messages, provider=None, model=None, **kwargs):
+        calls.append((provider, model))
+        return "Свободная модель ответила", {"provider": provider, "model": model}
+
+    monkeypatch.setattr(ai_providers, "_chat_completion_once", fake_once)
+    text, meta = ai_providers.chat_completion([{"role": "user", "content": "Привет"}])
+    assert text == "Свободная модель ответила"
+    assert calls == [("openrouter", "openrouter/free")]
+    assert meta["model"] == "openrouter/free"
+
