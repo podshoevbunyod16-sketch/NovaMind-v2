@@ -241,8 +241,11 @@ def test_offline_datetime_is_real():
 
 # ══════════════ офлайн-агент: поиск настоящим инструментом ══════════════
 
-def test_offline_agent_searches_when_model_is_absent(client, sandbox, fake_search):
+def test_offline_agent_searches_when_model_is_absent(client, sandbox, fake_search, monkeypatch):
     """Без языковой модели «найди …» всё равно идёт в настоящий поиск."""
+    import config
+    monkeypatch.setattr(config, "current_provider", "local_demo")
+    monkeypatch.setattr(config, "current_model", "nova-local-1")
     events = ndjson(client.post("/api/agent/stream", json={"message": "найди asyncio"}))
     assert fake_search, "поиск не вызывался"
     assert fake_search[0]["query"] == "asyncio", fake_search
@@ -254,6 +257,9 @@ def test_offline_agent_searches_when_model_is_absent(client, sandbox, fake_searc
 
 
 def test_offline_agent_keeps_honest_answer_when_search_is_empty(client, sandbox, monkeypatch):
+    import config
+    monkeypatch.setattr(config, "current_provider", "local_demo")
+    monkeypatch.setattr(config, "current_model", "nova-local-1")
     monkeypatch.setattr(agent_routes, "nova_search",
                         lambda query, limit=8: ([], {"backend": "none"}))
     events = ndjson(client.post("/api/agent/stream", json={"message": "найди неизвестно-что"}))

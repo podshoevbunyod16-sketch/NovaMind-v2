@@ -149,6 +149,7 @@ PROVIDERS = {
             "X-Title": "NovaMind AI",
         },
         "models": [
+            {"id": "openrouter/free", "name": "OpenRouter Free Models Router", "free": True},
             {"id": "google/gemini-2.0-flash-exp:free", "name": "Gemini 2.0 Flash (Free)", "free": True},
             {"id": "deepseek/deepseek-chat-v3-0324:free", "name": "DeepSeek Chat V3 (Free)", "free": True},
         ]
@@ -160,9 +161,7 @@ PROVIDERS = {
             "Content-Type": "application/json"
         },
         "models": [
-            {"id": "gemini-2.0-flash", "name": "Gemini 2.0 Flash (free tier)", "free": True},
-            {"id": "gemini-2.0-flash-lite", "name": "Gemini 2.0 Flash Lite (free tier)", "free": True},
-            {"id": "gemini-1.5-flash", "name": "Gemini 1.5 Flash (free tier)", "free": True},
+            {"id": "gemini-3.8-flash", "name": "Gemini 3.8 Flash (free tier)", "free": True},
         ]
     },
     "pollinations": {
@@ -265,6 +264,11 @@ def load_runtime_settings():
                 "qwen/qwen3.6-27b",
             }:
                 current_model = "openai/gpt-oss-120b"
+            if (current_provider == "google_ai_studio"
+                    and str(current_model).removeprefix("models/") in {
+                        "gemini-2.0-flash", "gemini-2.0-flash-lite", "gemini-1.5-flash"
+                    }):
+                current_model = "gemini-3.8-flash"
             system_prompt    = s.get("system_prompt", system_prompt)
             saved_media = s.get("media_selection")
             media_selection = saved_media if isinstance(saved_media, dict) else {}
@@ -403,27 +407,15 @@ def first_available_provider() -> str:
 
 
 def ensure_usable_provider() -> None:
-    """
-    Если выбранный провайдер не может ответить (нет ключа), переключаемся на
-    тот, который может. Без этого чат молча возвращал «нет ответа от ИИ».
-    """
-    global current_provider, current_model
+    """Validate the selection without silently changing provider or model."""
     if current_provider not in PROVIDERS:
-        current_provider = "local_demo"
-        current_model = "nova-local-1"
+        logger.error("Выбран неизвестный AI-провайдер '%s'; автоматическая замена отключена", current_provider)
         return
-    if current_provider == "local_demo" or has_credentials(current_provider):
-        return
-    fallback = first_available_provider()
-    logger.warning("Провайдер '%s' не подключён — переключаюсь на '%s'", current_provider, fallback)
-    current_provider = fallback
-    models = PROVIDERS.get(fallback, {}).get("models") or []
-    if fallback == "openai_compatible":
-        # У локального сервера имя модели задаётся в .env — берём его.
-        current_model = os.getenv("OPENAI_MODEL") or os.getenv("AI_MODEL") or (
-            models[0]["id"] if models else "local-model")
-    else:
-        current_model = models[0]["id"] if models else "nova-local-1"
+    if current_provider != "local_demo" and not has_credentials(current_provider):
+        logger.warning(
+            "Провайдер '%s' не подключён. Выбор сохранён; подключите credentials или выберите другой провайдер вручную.",
+            current_provider,
+        )
 
 
 ensure_usable_provider()

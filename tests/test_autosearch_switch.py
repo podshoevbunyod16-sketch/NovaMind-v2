@@ -7,6 +7,7 @@
 import json
 
 import pytest
+import config
 
 import routes.agent as agent_routes
 from agent.loop import AgentContext, run_react
@@ -159,6 +160,10 @@ def test_plain_chat_also_has_no_tools_when_autosearch_off(client, monkeypatch):
 
     monkeypatch.setattr(chat_routes, "complete_with_mcp", fake_mcp)
     monkeypatch.setattr(chat_routes, "media_generation_context", fake_media)
+    # This test is about tool suppression, not provider failover. Select the
+    # built-in offline provider explicitly so the chat request can complete.
+    monkeypatch.setattr(config, "current_provider", "local_demo")
+    monkeypatch.setattr(config, "current_model", "nova-local-1")
 
     response = client.post("/send", json={"message": "привет", "tools": False})
     assert response.status_code == 200

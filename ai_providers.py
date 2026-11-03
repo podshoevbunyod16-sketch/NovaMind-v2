@@ -68,35 +68,77 @@ def openai_compatible_request(url, payload, headers, timeout=90, max_retries=2):
     return None, "OpenAI-compatible сервер недоступен"
 
 
+_DURATION_PART = re.compile(r"(\d+(?:\.\d+)?)\s*([hms])", re.IGNORECASE)
+_MAX_COOLDOWN_SECONDS = 25 * 3600
+
+
+def _parse_duration_seconds(value):
+    """Parse compound durations such as 2m15.4s, 1h2m or 0.5s."""
+    raw = str(value or "").strip().lower()
+    parts = _DURATION_PART.findall(raw)
+    if not parts:
+        return None
+    residue = _DURATION_PART.sub("", raw).strip(" ,;")
+    if residue:
+        return None
+    factors = {"h": 3600, "m": 60, "s": 1}
+    seconds = sum(float(amount) * factors[unit.lower()] for amount, unit in parts)
+    if seconds <= 0:
+        return None
+    return max(1, min(int(seconds + 0.999), _MAX_COOLDOWN_SECONDS))
+
+
+def _header_value(headers, name):
+    for key, value in (headers or {}).items():
+        if str(key).lower() == name.lower():
+            return value
+    return None
+
+
+def _reset_value_seconds(value):
+    duration = _parse_duration_seconds(value)
+    if duration is not None:
+        return duration
+    try:
+        number = float(str(value).strip())
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if number > 1_000_000_000:
+        number -= time.time()  # Unix timestamp
+    if number <= 0:
+        return None
+    return max(1, min(int(number + 0.999), _MAX_COOLDOWN_SECONDS))
+
+
 def _retry_after_seconds(headers, default=60):
-    """Разбирает Retry-After и rate-limit reset headers с верхним безопасным пределом."""
+    """Return the longest valid Retry-After/rate-limit reset window."""
     headers = headers or {}
-    value = headers.get("Retry-After")
+    candidates = []
+    value = _header_value(headers, "Retry-After")
     if value:
-        try:
-            return max(1, min(int(float(value)), 25 * 3600))
-        except (TypeError, ValueError):
+        duration = _parse_duration_seconds(value)
+        if duration is not None:
+            candidates.append(duration)
+        else:
             try:
-                when = parsedate_to_datetime(value)
-                if when.tzinfo is None:
-                    when = when.replace(tzinfo=timezone.utc)
-                return max(1, min(int((when - datetime.now(timezone.utc)).total_seconds()), 25 * 3600))
+                candidates.append(max(1, min(int(float(value) + 0.999), _MAX_COOLDOWN_SECONDS)))
             except (TypeError, ValueError, OverflowError):
-                pass
-    for name in ("X-RateLimit-Reset", "x-ratelimit-reset-requests", "x-ratelimit-reset-tokens", "x-ratelimit-reset"):
-        value = headers.get(name)
-        if not value:
-            continue
-        try:
-            raw = str(value).strip().lower()
-            seconds = float(raw[:-1]) if raw.endswith("s") else float(raw)
-            if not raw.endswith("s") and seconds > 1_000_000_000:
-                seconds -= time.time()
-            if seconds > 0:
-                return max(1, min(int(seconds), 25 * 3600))
-        except (TypeError, ValueError, OverflowError):
-            continue
-    return max(1, min(int(default), 25 * 3600))
+                try:
+                    when = parsedate_to_datetime(value)
+                    if when.tzinfo is None:
+                        when = when.replace(tzinfo=timezone.utc)
+                    seconds = int((when - datetime.now(timezone.utc)).total_seconds())
+                    if seconds > 0:
+                        candidates.append(min(seconds, _MAX_COOLDOWN_SECONDS))
+                except (TypeError, ValueError, OverflowError):
+                    pass
+
+    for name, value in headers.items():
+        if "ratelimit-reset" in str(name).lower() or str(name).lower() == "x-ratelimit-reset":
+            seconds = _reset_value_seconds(value)
+            if seconds is not None:
+                candidates.append(seconds)
+    return max(candidates) if candidates else max(1, min(int(default), _MAX_COOLDOWN_SECONDS))
 
 
 def _groq_key_index(key):
@@ -113,13 +155,21 @@ def _groq_key_index(key):
 
 def _groq_429_cooldown(response, detail):
     headers = getattr(response, "headers", {}) or {}
-    text = (detail or "").lower()
-    reset_headers = " ".join(str(v).lower() for k, v in headers.items() if "reset" in k.lower())
+    text = str(detail or "").lower()
+    reset_headers = " ".join(str(v).lower() for k, v in headers.items() if "reset" in str(k).lower())
     daily = ("per day", "per-day", "daily limit", "daily quota", "tokens per day", "requests per day", "day limit")
-    if any(term in text for term in daily) or "daily" in reset_headers:
-        return _retry_after_seconds(headers, GROQ_KEY_COOLDOWN)
-    # The word "quota" alone is ambiguous and should not trigger a 25-hour lockout.
-    return _retry_after_seconds(headers, 60)
+    is_daily = any(term in text for term in daily) or "daily" in reset_headers
+    header_seconds = _retry_after_seconds(headers, GROQ_KEY_COOLDOWN if is_daily else 60)
+    # Groq's message commonly says "Please try again in 2m15.4s".
+    body_seconds = None
+    match = re.search(r"\b(?:in|after)\s+((?:\d+(?:\.\d+)?\s*[hms]\s*)+)", text)
+    if match:
+        body_seconds = _parse_duration_seconds(match.group(1))
+    if is_daily and body_seconds is None and not any(
+        _reset_value_seconds(v) for k, v in headers.items() if "ratelimit-reset" in str(k).lower()
+    ) and not _header_value(headers, "Retry-After"):
+        return GROQ_KEY_COOLDOWN
+    return max(header_seconds, body_seconds or 0)
 
 
 def _format_gemini_error(status_code, response):
@@ -172,13 +222,16 @@ def gemini_messages_from_openai(messages):
                 name = str(function.get("name") or "")
                 if not name: continue
                 args, _err = _parse_tool_arguments(function.get("arguments"))
-                call_names[str(call.get("id") or name)] = name
-                parts.append({"functionCall": {"name": name, "args": args}})
+                call_id = str(call.get("id") or f"call_{len(call_names)}")
+                call_names[call_id] = name
+                parts.append({"functionCall": {"name": name, "args": args, "id": call_id}})
             if parts: contents_out.append({"role":"model","parts":parts})
         elif role=="tool":
-            name = call_names.get(str(message.get("tool_call_id") or "")) or str(message.get("name") or "tool")
-            contents_out.append({"role":"user","parts":[{"functionResponse":{
-                "name": name, "response": {"result": content}}}]})
+            tool_call_id = str(message.get("tool_call_id") or "")
+            name = call_names.get(tool_call_id) or str(message.get("name") or "tool")
+            function_response = {"name": name, "response": {"result": content},
+                                 "call_id": tool_call_id or name}
+            contents_out.append({"role": "user", "parts": [{"functionResponse": function_response}]})
         else: contents_out.append({"role":"user","parts":[{"text":content}]})
     return system_text,contents_out
 
@@ -197,13 +250,26 @@ def gemini_tools_payload(tools):
                              "parameters": parameters})
     return [{"functionDeclarations": declarations}] if declarations else []
 
+def _gemini_generation_config(model, payload):
+    """Build generation settings compatible with Gemini 3+ model contracts."""
+    model_id = str(model or "").strip().removeprefix("models/").lower()
+    generation_config = {
+        "maxOutputTokens": min(int(payload.get("max_tokens", 65536)), 65536),
+    }
+    # Gemini 3.x/4.x no longer accepts legacy sampling controls such as
+    # temperature. Keep it only for older model families.
+    if not model_id.startswith(("gemini-3", "gemini-4")):
+        generation_config["temperature"] = float(payload.get("temperature", 0.7))
+    return generation_config
+
+
 def gemini_request(model,payload,timeout=90,max_retries=2):
     key=(os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_AI_STUDIO_KEY") or "").strip()
     if not key: return None,"Google AI Studio: GEMINI_API_KEY не найден в .env"
     model_id=str(model or "").strip().removeprefix("models/")
     system_text,contents_out=gemini_messages_from_openai(payload.get("messages",[]))
     if not contents_out: return None,"Google AI Studio: отсутствует сообщение"
-    body={"contents":contents_out,"generationConfig":{"temperature":float(payload.get("temperature",0.7)),"maxOutputTokens":min(int(payload.get("max_tokens",65536)),65536)}}
+    body={"contents": contents_out, "generationConfig": _gemini_generation_config(model_id, payload)}
     if system_text: body["systemInstruction"]={"parts":[{"text":system_text}]}
     gemini_tools=gemini_tools_payload(payload.get("tools"))
     if gemini_tools:
@@ -228,7 +294,7 @@ def gemini_request(model,payload,timeout=90,max_retries=2):
                     if part.get("text"): parts.append(part["text"])
                     call = part.get("functionCall") if isinstance(part, dict) else None
                     if isinstance(call, dict) and call.get("name"):
-                        tool_calls.append({"id": f"call_{len(tool_calls)}", "type": "function",
+                        tool_calls.append({"id": str(call.get("id") or f"call_{len(tool_calls)}"), "type": "function",
                                            "function": {"name": call["name"],
                                                         "arguments": json.dumps(call.get("args") or {}, ensure_ascii=False)}})
             if not parts and not tool_calls: return None,"Google AI Studio не вернул текст"
@@ -262,10 +328,7 @@ def gemini_stream_request(model,payload,timeout=90):
 
     body={
         "contents": contents_out,
-        "generationConfig":{
-            "temperature":float(payload.get("temperature",0.7)),
-            "maxOutputTokens":min(int(payload.get("max_tokens",65536)),65536)
-        }
+        "generationConfig": _gemini_generation_config(model_id, payload)
     }
     if system_text:
         body["systemInstruction"]={"parts":[{"text":system_text}]}
@@ -322,17 +385,9 @@ def groq_request_with_rotation(url, payload, headers, timeout=90, max_retries=3)
         try:
             resp = requests.post(url, json=payload, headers=request_headers, timeout=timeout)
         except requests.exceptions.Timeout:
-            last_error = "Таймаут запроса к Groq"
-            if attempt < max_attempts - 1:
-                time.sleep(1)
-                continue
-            return None, last_error
+            return None, "Таймаут запроса к Groq; API-ключ не менялся."
         except requests.exceptions.RequestException as exc:
-            last_error = f"Ошибка соединения с Groq: {exc}"
-            if attempt < max_attempts - 1:
-                time.sleep(1)
-                continue
-            return None, last_error
+            return None, f"Ошибка соединения с Groq: {exc}; API-ключ не менялся."
 
         if resp.status_code == 401:
             last_error = "Groq HTTP 401: API-ключ отклонён; ключ временно отложен. После 3 последовательных 401 он будет отключён до перезапуска."
@@ -353,8 +408,7 @@ def groq_request_with_rotation(url, payload, headers, timeout=90, max_retries=3)
                          cooldown_sec=cooldown, retry_after_sec=pm.parse_retry_after(resp_headers),
                          attempt=attempt + 1)
             if attempt < max_attempts - 1:
-                time.sleep(pm.backoff_delay(attempt, pm.parse_retry_after(resp_headers)))
-                continue
+                continue  # next Groq key; the exhausted key remains in its own cooldown
             return None, last_error
 
         if resp.status_code >= 400:
@@ -509,28 +563,19 @@ def supports_reasoning(model: str) -> bool:
 
 
 def resolve_target(provider: str = None, model: str = None):
-    """(provider, model, provider_cfg) — с откатом на рабочий провайдер."""
+    """Resolve only the explicitly selected provider/model; never switch silently."""
     import config
     provider = provider or config.current_provider
     model = model or config.current_model
-    cfg = config.PROVIDERS.get(provider) or config.PROVIDERS["local_demo"]
-    if not config.has_credentials(provider):
-        fallback = config.first_available_provider()
-        if fallback != provider:
-            models = config.PROVIDERS.get(fallback, {}).get("models") or []
-            return fallback, (models[0]["id"] if models else "nova-local-1"), config.PROVIDERS[fallback]
+    cfg = config.PROVIDERS.get(provider)
+    if cfg is None:
+        raise ValueError(f"Неизвестный AI-провайдер: {provider}")
     return provider, model, cfg
 
 
 FREE_TIER_PROVIDERS = frozenset({
     "groq", "cerebras", "google_ai_studio", "openai_compatible", "local_demo",
 })
-DEFAULT_FAILOVER_ORDER = (
-    "groq", "google_ai_studio", "cerebras", "openrouter", "pollinations",
-    "openai_compatible", "local_demo",
-)
-
-
 def is_free_ai_model(provider: str, model: str, entry: dict | None = None) -> bool:
     """Whether a chat target is guaranteed not to select a paid model.
 
@@ -541,6 +586,9 @@ def is_free_ai_model(provider: str, model: str, entry: dict | None = None) -> bo
     provider = str(provider or "").strip()
     model_id = str(model or "").strip().lower()
     item = entry if isinstance(entry, dict) else {}
+    if provider == "openrouter" and model_id == "openrouter/free":
+        # OpenRouter's dedicated router selects only currently available free models.
+        return True
     if provider == "google_ai_studio":
         # Google catalog includes paid-only Pro/preview models. Keep only the
         # explicit free-tier allowlist maintained in config.py.
@@ -593,10 +641,9 @@ def provider_manager():
 
 
 def _pm_mark_failure(provider, model, error_text):
-    """Отмечает ошибку провайдера в едином менеджере (cooldown его ключа).
-
-    Провайдеры без зарегистрированных ключей (local_demo и т.п.) пропускаются.
-    """
+    """Отмечает ошибку в Provider Manager; Groq keys are tracked per-key separately."""
+    if provider == "groq":
+        return  # groq_rotation knows the exact key used by the failed request
     try:
         manager = provider_manager()
         if provider not in manager.provider_names():
@@ -624,30 +671,11 @@ def _pm_skip_provider(name):
 
 
 def free_failover_targets(provider: str | None = None, model: str | None = None) -> list[tuple[str, str]]:
-    """Primary target followed by credentialed free alternatives."""
-    import config
+    """Return only the selected free target; provider/model failover is disabled."""
     primary_provider, primary_model, _cfg = resolve_target(provider, model)
-    raw_order = [part.strip() for part in os.getenv("AI_FAILOVER_ORDER", "").split(",") if part.strip()]
-    order = [primary_provider, *(raw_order or DEFAULT_FAILOVER_ORDER)]
-    targets: list[tuple[str, str]] = []
-    for name in order:
-        if name not in config.PROVIDERS or any(p == name for p, _m in targets):
-            continue
-        if (name != primary_provider and name not in {"local_demo", "openai_compatible"}
-                and not config.has_credentials(name)):
-            continue
-        if name != primary_provider and _pm_skip_provider(name):
-            pm.log_event("info", "provider_skipped", provider=name, model=model,
-                         reason="all keys in cooldown", result="skip")
-            continue
-        selected = primary_model if name == primary_provider else ""
-        models = _free_models(name, selected)
-        if not models:
-            continue
-        targets.append((name, models[0]))
-    if not any(name == "local_demo" for name, _model in targets):
-        targets.append(("local_demo", "nova-local-1"))
-    return targets
+    if not primary_model or not is_free_ai_model(primary_provider, primary_model):
+        return []
+    return [(primary_provider, primary_model)]
 
 
 def _chat_completion_once(messages, provider=None, model=None, system=None,
@@ -723,36 +751,24 @@ def _chat_completion_once(messages, provider=None, model=None, system=None,
 def chat_completion(messages, provider=None, model=None, system=None,
                     temperature=0.7, max_tokens=None, timeout=90, extra=None,
                     tools=None, tool_choice=None):
-    """Completion with automatic failover across free models only."""
-    failures: list[dict] = []
-    targets = free_failover_targets(provider, model)
-    for index, (target_provider, target_model) in enumerate(targets):
-        text, meta = _chat_completion_once(
-            messages, provider=target_provider, model=target_model, system=system,
-            temperature=temperature, max_tokens=max_tokens, timeout=timeout,
-            extra=extra, tools=tools, tool_choice=tool_choice,
-        )
-        if text is not None:
-            result_meta = dict(meta or {}) if isinstance(meta, dict) else {}
-            result_meta["failover"] = list(failures)
-            result_meta["failover_count"] = len(failures)
-            result_meta["free_model"] = True
-            if failures:
-                logger.warning("AI failover succeeded: %s/%s after %d failure(s)",
-                               target_provider, target_model, len(failures))
-                pm.log_event("info", "failover_succeeded", provider=target_provider,
-                             model=target_model, switched_to=target_provider,
-                             result="ok", reason=f"after {len(failures)} failure(s)")
-            return text, result_meta
-        failure = {"provider": target_provider, "model": target_model,
-                   "error": pm.redact(str(meta or "неизвестная ошибка")[:500])}
-        failures.append(failure)
-        logger.warning("AI provider failed (%s/%s), trying next free provider: %s",
-                       target_provider, target_model, failure["error"])
-        pm.log_event("warning", "provider_exhausted", provider=target_provider,
-                     model=target_model, reason=failure["error"], result="switch_to_next")
-    return None, "Все бесплатные AI-провайдеры недоступны: " + "; ".join(
-        f"{item['provider']}: {item['error']}" for item in failures)
+    """Run exactly the selected free provider/model; never fail over."""
+    try:
+        targets = free_failover_targets(provider, model)
+    except ValueError as exc:
+        return None, str(exc)
+    if not targets:
+        return None, "Выбранная модель платная, неизвестная или не настроена. Автоматическая замена модели отключена."
+    target_provider, target_model = targets[0]
+    text, meta = _chat_completion_once(
+        messages, provider=target_provider, model=target_model, system=system,
+        temperature=temperature, max_tokens=max_tokens, timeout=timeout,
+        extra=extra, tools=tools, tool_choice=tool_choice,
+    )
+    if text is None:
+        return None, meta
+    result_meta = dict(meta or {}) if isinstance(meta, dict) else {}
+    result_meta.update({"failover": [], "failover_count": 0, "free_model": True})
+    return text, result_meta
 
 
 def _chat_stream_once(messages, provider=None, model=None, system=None, temperature=0.7,
@@ -855,47 +871,25 @@ def _chat_stream_once(messages, provider=None, model=None, system=None, temperat
 
 def chat_stream(messages, provider=None, model=None, system=None, temperature=0.7,
                 max_tokens=None, timeout=90, reasoning=False, reasoning_effort="low"):
-    """Stream from the first responsive free provider.
-
-    Events are buffered until the first answer token. Thus a provider that
-    times out or returns an empty response can be replaced without leaving a
-    broken bubble or leaking an intermediate error into the user response.
-    Once tokens started, the stream is never replayed through another model to
-    avoid duplicated/mixed answers.
-    """
-    failures: list[str] = []
-    targets = free_failover_targets(provider, model)
-    for target_provider, target_model in targets:
-        pending: list[tuple[str, str]] = []
-        produced_token = False
-        failed = ""
-        for kind, chunk in _chat_stream_once(
-            messages, provider=target_provider, model=target_model, system=system,
-            temperature=temperature, max_tokens=max_tokens, timeout=timeout,
-            reasoning=reasoning, reasoning_effort=reasoning_effort,
-        ):
-            if kind == "error" and not produced_token:
-                failed = str(chunk or "ошибка потока")
-                continue
-            if kind == "token":
-                if not produced_token:
-                    produced_token = True
-                    for buffered in pending:
-                        yield buffered
-                    pending.clear()
-                yield kind, chunk
-            elif kind == "done":
-                continue
-            elif produced_token:
-                yield kind, chunk
-            else:
-                pending.append((kind, chunk))
-        if produced_token:
-            yield "done", ""
-            return
-        failures.append(f"{target_provider}/{target_model}: {failed or 'пустой ответ'}")
-        logger.warning("AI stream failover: %s", failures[-1])
-    yield "error", "Все бесплатные AI-провайдеры недоступны: " + "; ".join(failures)
+    """Stream only from the selected free provider/model; never replay elsewhere."""
+    try:
+        targets = free_failover_targets(provider, model)
+    except ValueError as exc:
+        yield "error", str(exc)
+        yield "done", ""
+        return
+    if not targets:
+        yield "error", "Выбранная модель платная, неизвестная или не настроена. Автоматическая замена модели отключена."
+        yield "done", ""
+        return
+    target_provider, target_model = targets[0]
+    for kind, chunk in _chat_stream_once(
+        messages, provider=target_provider, model=target_model, system=system,
+        temperature=temperature, max_tokens=max_tokens, timeout=timeout,
+        reasoning=reasoning, reasoning_effort=reasoning_effort,
+    ):
+        if kind != "done":
+            yield kind, chunk
     yield "done", ""
 
 
@@ -967,9 +961,6 @@ def _raw_stream(provider, model, payload, cfg, timeout):
                                      timeout=(min(30, timeout), timeout), stream=True)
         except requests.exceptions.RequestException as exc:
             last_error = f"Ошибка соединения с {provider}: {exc.__class__.__name__}"
-            if attempt < attempts - 1:
-                time.sleep(pm.backoff_delay(attempt))
-                continue
             yield "error", last_error
             return
 
@@ -1237,6 +1228,16 @@ def fetch_available_models(provider, force=False):
                     if (m.get("id") or m.get("name"))
                     and (provider != "groq" or m.get("active", True) is not False)
                 ]
+
+            # The router alias is not part of OpenRouter's ordinary model list,
+            # but is a documented free-only endpoint and must remain selectable.
+            if provider == "openrouter" and not any(
+                    item.get("id") == "openrouter/free" for item in models):
+                models.append(normalize_model({
+                    "id": "openrouter/free",
+                    "name": "OpenRouter Free Models Router",
+                    "free": True,
+                }, provider))
 
             # NovaMind text chat is free-only: paid/unknown cloud models are
             # neither shown in settings nor eligible for failover.

@@ -80,6 +80,9 @@ def test_workspace_action_records_output_and_step(admin_client, sandbox, monkeyp
 
 def test_offline_provider_performs_explicit_search_without_model(client, sandbox,
                                                                  monkeypatch):
+    import config
+    monkeypatch.setattr(config, "current_provider", "local_demo")
+    monkeypatch.setattr(config, "current_model", "nova-local-1")
     monkeypatch.setattr(agent_routes, "nova_search", lambda query, limit=8:
                         ([{"title": "Источник", "url": "https://example.com", "snippet": "данные"}], {}))
     events = ndjson(client.post("/api/agent/stream", json={"message": "найди источник"}))

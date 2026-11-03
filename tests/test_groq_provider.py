@@ -184,3 +184,64 @@ def test_chat_stream_marks_partial_response_as_incomplete(monkeypatch):
     events = list(ai_providers.chat_stream([{"role": "user", "content": "hi"}]))
     errors = [chunk for kind, chunk in events if kind == "error"]
     assert errors and "не полностью" in errors[0]
+
+
+def test_retry_after_parses_compound_duration():
+    assert ai_providers._retry_after_seconds({"Retry-After": "2m15.4s"}) == 136
+
+
+def test_retry_after_uses_longest_request_and_token_reset():
+    assert ai_providers._retry_after_seconds({
+        "x-ratelimit-reset-requests": "3.2s",
+        "x-ratelimit-reset-tokens": "1h2m",
+    }) == 3720
+
+
+def test_retry_after_parses_fractional_seconds():
+    assert ai_providers._retry_after_seconds({"Retry-After": "0.5s"}) == 1
+
+
+def test_groq_429_reads_retry_duration_from_body():
+    class Response:
+        headers = {}
+    assert ai_providers._groq_429_cooldown(
+        Response(), "Please try again in 2m15.4s"
+    ) == 136
+
+
+def test_groq_429_uses_longest_reset_window():
+    class Response:
+        headers = {
+            "x-ratelimit-reset-requests": "3.2s",
+            "x-ratelimit-reset-tokens": "1h2m",
+        }
+    assert ai_providers._groq_429_cooldown(Response(), "rate limit reached") == 3720
+
+
+def test_groq_daily_limit_uses_long_cooldown():
+    class Response:
+        headers = {}
+    assert ai_providers._groq_429_cooldown(Response(), "requests per day limit reached") == groq_rotation.GROQ_KEY_COOLDOWN
+
+
+def test_groq_rotation_does_not_sleep_between_limited_keys(monkeypatch):
+    calls = []
+    keys = ["key-1", "key-2"]
+    responses = iter([
+        type("Response", (), {"status_code": 429, "text": "rate limit", "headers": {}})(),
+        type("Response", (), {"status_code": 200, "json": lambda self: {"choices": [{"message": {"content": "ok"}}]}, "headers": {}})(),
+    ])
+    monkeypatch.setattr(ai_providers, "GROQ_KEYS_LIST", lambda: [{"key": k} for k in keys])
+    monkeypatch.setattr(ai_providers, "get_groq_key", lambda: keys.pop(0) if keys else "")
+    monkeypatch.setattr(ai_providers.requests, "post", lambda *a, **k: next(responses))
+    monkeypatch.setattr(ai_providers, "mark_groq_key_exhausted", lambda **kw: calls.append(kw))
+    monkeypatch.setattr(ai_providers.time, "sleep", lambda *_a: (_ for _ in ()).throw(AssertionError("unexpected sleep")))
+
+    data, error = ai_providers.groq_request_with_rotation(
+        "https://api.groq.com/openai/v1/chat/completions",
+        {"model": "openai/gpt-oss-120b", "messages": [{"role": "user", "content": "hi"}]},
+        {}, timeout=1, max_retries=2,
+    )
+    assert error is None
+    assert data["choices"][0]["message"]["content"] == "ok"
+    assert calls == [{"cooldown_seconds": 60, "key": "key-1"}]
