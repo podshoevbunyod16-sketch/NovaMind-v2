@@ -62,14 +62,13 @@ def complete_with_mcp(messages: list[dict[str, Any]], *, system: str, provider: 
     """Return (reply, meta, events). If no MCP is connected, behaves normally."""
     if not _mcp_allowed_for_user():
         return None, None, []
+    # Единая точка управления MCP — только MCP Manager; он сам изолирует
+    # ошибки отдельных серверов и возвращает [] при полном недоступности.
     try:
         import mcp_manager
         tools = mcp_manager.discover_tools()
     except Exception:
-        try:
-            tools = mcp_registry.connected_tools()
-        except Exception:
-            tools = []
+        tools = []
     if not tools:
         return None, None, []
 
