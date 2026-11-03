@@ -298,8 +298,11 @@ def test_ordinary_mcp_chat_uses_registry_and_exposes_only_readonly_tools(monkeyp
     ]
     monkeypatch.setattr(mcp_registry, "connected_tools", lambda: discovered)
     summaries = []
-    monkeypatch.setattr(mcp_registry, "format_tools_summary",
-                        lambda tools: summaries.extend(item["name"] for item in tools) or "read_page")
+    original_tool_prompt = mcp_chat._tool_prompt
+    def capture_tool_prompt(tools):
+        summaries.extend(item["name"] for item in tools)
+        return original_tool_prompt(tools)
+    monkeypatch.setattr(mcp_chat, "_tool_prompt", capture_tool_prompt)
     monkeypatch.setattr(mcp_registry, "resolve_server_id", lambda *_args, **_kwargs: "docs")
     monkeypatch.setattr(tool_registry, "bootstrap_default_tools", lambda: None)
     calls = []
@@ -371,9 +374,12 @@ def test_streaming_chat_never_switches_to_local_model_after_selected_target_fail
     monkeypatch.setattr(local_llm, "complete",
                         lambda *_args, **_kwargs: pytest.fail("silent local fallback must not run"))
 
-    events = ndjson(admin_client.post("/send_stream", json={"message": "Привет"}))
+    response = admin_client.post("/send_stream", json={"message": "Привет"})
+    events = ndjson(response)
 
     assert selected and selected[0][0] is not None and selected[0][1] is not None
-    assert not events_of(events, "token")
-    assert events_of(events, "done")[-1]["has_reply"] is False
+    assert not any("token" in event for event in events)
+    done = [event for event in events if event.get("done") is True]
+    assert done and done[-1]["has_reply"] is False
+    assert (done[-1]["provider"], done[-1]["model"]) == selected[0]
 

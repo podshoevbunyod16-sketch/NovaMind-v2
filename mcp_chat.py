@@ -43,7 +43,13 @@ def _extract_action(text: str) -> dict[str, Any] | None:
 
 
 def _tool_prompt(tools: list[dict[str, Any]]) -> str:
-    summary = mcp_registry.format_tools_summary(tools)
+    # Keep formatting local to this module: mcp_registry owns discovery and
+    # transport, not prompt presentation.
+    summary = "\n".join(
+        f"- {item.get('server_name') or item.get('server_id')} / {item.get('name')}: "
+        f"{str(item.get('description') or '')[:240]}"
+        for item in tools
+    )
     return (
         "\n\nMCP TOOLS ARE AVAILABLE. Choose the appropriate MCP server and tool automatically "
         "from the user's request without asking the user for server_id or extra instructions.\n"
