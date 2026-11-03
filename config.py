@@ -403,27 +403,15 @@ def first_available_provider() -> str:
 
 
 def ensure_usable_provider() -> None:
-    """
-    Если выбранный провайдер не может ответить (нет ключа), переключаемся на
-    тот, который может. Без этого чат молча возвращал «нет ответа от ИИ».
-    """
-    global current_provider, current_model
+    """Validate the selection without silently changing provider or model."""
     if current_provider not in PROVIDERS:
-        current_provider = "local_demo"
-        current_model = "nova-local-1"
+        logger.error("Выбран неизвестный AI-провайдер '%s'; автоматическая замена отключена", current_provider)
         return
-    if current_provider == "local_demo" or has_credentials(current_provider):
-        return
-    fallback = first_available_provider()
-    logger.warning("Провайдер '%s' не подключён — переключаюсь на '%s'", current_provider, fallback)
-    current_provider = fallback
-    models = PROVIDERS.get(fallback, {}).get("models") or []
-    if fallback == "openai_compatible":
-        # У локального сервера имя модели задаётся в .env — берём его.
-        current_model = os.getenv("OPENAI_MODEL") or os.getenv("AI_MODEL") or (
-            models[0]["id"] if models else "local-model")
-    else:
-        current_model = models[0]["id"] if models else "nova-local-1"
+    if current_provider != "local_demo" and not has_credentials(current_provider):
+        logger.warning(
+            "Провайдер '%s' не подключён. Выбор сохранён; подключите credentials или выберите другой провайдер вручную.",
+            current_provider,
+        )
 
 
 ensure_usable_provider()

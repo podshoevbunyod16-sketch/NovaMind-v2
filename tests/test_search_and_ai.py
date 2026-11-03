@@ -290,14 +290,15 @@ def test_clean_prompt_strips_context_blocks():
     ) == "курс доллара"
 
 
-def test_offline_model_is_used_when_no_keys_configured(monkeypatch):
+def test_missing_groq_keys_do_not_switch_to_offline_provider(monkeypatch):
     monkeypatch.setattr(config, "current_provider", "groq")
-    monkeypatch.setattr(config, "current_model", "llama-3.3-70b-versatile")
+    monkeypatch.setattr(config, "current_model", "openai/gpt-oss-120b")
     import groq_rotation
     monkeypatch.setattr(groq_rotation, "GROQ_KEYS", [])
-    reply, meta = chat_completion([{"role": "user", "content": "2+2=?"}])
-    assert meta["provider"] == "local_demo" and meta["offline"] is True
-    assert "2+2 = **4**" in reply
+    reply, error = chat_completion([{"role": "user", "content": "2+2=?"}])
+    assert reply is None
+    assert "Groq API ключ не найден" in error
+    assert config.current_provider == "groq"
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -446,8 +447,7 @@ def test_send_fallback_endpoint_works(client, local_runtime):
     assert data["chat_id"]
 
 
-def test_send_falls_back_instead_of_returning_empty_reply(client, monkeypatch):
-    """Мёртвый провайдер автоматически уступает бесплатной офлайн-модели."""
+def test_send_does_not_switch_when_selected_provider_is_unavailable(client, monkeypatch):
     monkeypatch.setitem(config.PROVIDERS, "openai_compatible", {
         **config.PROVIDERS["openai_compatible"],
         "url": "http://127.0.0.1:1/v1/chat/completions",
@@ -455,9 +455,8 @@ def test_send_falls_back_instead_of_returning_empty_reply(client, monkeypatch):
     monkeypatch.setattr(config, "current_provider", "openai_compatible")
     monkeypatch.setattr(config, "current_model", "dead-model")
     response = client.post("/send", json={"message": "привет"})
-    data = response.get_json()
-    assert response.status_code == 200
-    assert data["reply"]
+    assert response.status_code == 502
+    assert config.current_provider == "openai_compatible"
 
 
 def test_ai_status_endpoint_reports_offline_model(client, monkeypatch):
