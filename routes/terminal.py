@@ -1,0 +1,1185 @@
+"""
+routes/terminal.py — маленькое Linux-окружение для чата.
+
+Что это:
+  * папка-песочница `workspace/` — она и есть «маленький Linux»: файлы,
+    заготовки, git-репозиторий;
+  * терминал с белым списком команд, палец в небо не уронит сервер;
+  * дерево файлов, чтение/запись, git-панель — всё в одном месте;
+  * отсюда же работает агентный режим (routes/agent.py).
+
+Безопасность (это сервер, а не песочница ОС):
+  1. выключено по умолчанию — включается TERMINAL_ENABLED=1 в .env;
+  2. только для администратора: session['admin_logged_in'];
+  3. команда запускается без shell, только из белого списка;
+  4. cwd всегда внутри workspace, пути не выходят за его пределы;
+  5. таймаут на команду, обрезанный вывод, лимит параллельных запусков.
+"""
+from flask import Blueprint, request, jsonify, session
+import os
+import re
+import shlex
+import signal
+import subprocess
+import sys
+import threading
+import time
+import uuid
+
+import identity  # noqa: E402
+
+terminal_bp = Blueprint("terminal", __name__)
+
+ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+WORKSPACE = os.path.realpath(os.environ.get("TERMINAL_DIR") or os.path.join(ROOT_DIR, "workspace"))
+
+
+def _ws():
+    """Рабочая папка пользователя; для ReAct-хода может быть конкретной сессией."""
+    try:
+        from agent.workspace import current_workspace
+        active = current_workspace()
+        if active is not None:
+            return str(active)
+    except Exception:
+        pass
+    return identity.current_workspace(WORKSPACE)
+
+COMMAND_TIMEOUT = float(os.getenv("TERMINAL_TIMEOUT", "20"))
+MAX_OUTPUT = int(os.getenv("TERMINAL_MAX_OUTPUT", "12000"))
+MAX_CONCURRENT = 2
+
+# Команды, которые можно выполнять. Всё остальное — отказ с подсказкой.
+ALLOWED_COMMANDS = {
+    # просмотр
+    "ls", "pwd", "cat", "head", "tail", "less", "more", "wc", "grep", "egrep", "fgrep",
+    "find", "fd", "tree", "stat", "file", "du", "df", "diff", "sort", "uniq", "cut", "awk",
+    "sed", "tr", "nl", "basename", "dirname", "realpath", "which", "type", "echo", "printf",
+    "date", "whoami", "id", "uname", "hostname", "uptime", "ps", "env", "printenv", "seq",
+    "true", "false", "sleep", "man", "help", "history", "clear",
+    # файлы
+    "mkdir", "touch", "cp", "mv", "rm", "chmod", "ln", "mktemp",
+    "md5sum", "sha1sum", "sha256sum", "base64", "iconv",
+    "rev", "tac", "paste", "column", "fmt", "fold", "expand", "unexpand",
+    "split", "csplit", "dos2unix", "xargs", "tee",
+    # разработка
+    "git", "python", "python3", "pip", "pip3", "node", "npm", "npx", "deno", "bun",
+    "pytest", "go", "rustc", "cargo", "java", "javac", "make", "jq", "curl", "wget",
+    "sqlite3", "tar", "zip", "unzip", "gzip", "bzip2", "xz",
+    "gcc", "g++", "perl", "ruby", "php", "lua", "tsc",
+    "ffmpeg", "ffprobe", "yt-dlp", "openssl", "bc",
+    # сеть
+    "ping", "ssh", "scp", "sftp", "ssh-keygen", "dig", "nslookup", "host",
+    "nc", "netcat", "ip", "ifconfig", "ss",
+    # система
+    "free", "lsblk", "groups", "w", "last", "kill", "pkill", "timeout",
+    # Termux-менеджеры пакетов
+    "pkg", "apt", "apt-get", "dpkg",
+    "nova",                 # встроенная команда окружения: поиск и чтение страниц
+}
+# Подстроки, которые запрещены даже внутри разрешённой команды:
+# склейка команд, sudo, подстановки в оболочку, фоновый запуск.
+# Пайпы «|» и перенаправления «>» «>>» «2>» «&>» разбираются отдельно.
+FORBIDDEN = (
+    "sudo", "su ", "doas", "chown", "chmod 777", "rm -rf /", ":(){", ">/dev/",
+    "&&", "||", "`", "$(", "${", "\n", ">&",
+)
+
+# «;» вне кавычек разделяет команды как в shell. Внутри кавычек это обычный
+# текст: python3 -c 'import time; time.sleep(1)' должен работать.
+_UNQUOTED_SEMICOLON = re.compile(r"""('[^']*'|"[^"]*")|;""")
+
+# Знаки перенаправления, которые понимает песочница.
+REDIRECT_OPS = (">", ">>", "2>", "2>>", "&>")
+
+#: Программы, которые должны запускаться тем же интерпретатором, что и сервер.
+#: Иначе агент ставит пакет одним Python (`venv/bin/python`), а приложение
+#: запускает другим (`/usr/bin/python3`) и получает ModuleNotFoundError.
+_INTERPRETER_PROGRAMS = {"python", "python3", "pip", "pip3", "pytest"}
+
+
+def _server_python_enabled() -> bool:
+    return (os.getenv("TERMINAL_SERVER_PYTHON", "1") or "").strip().lower() not in (
+        "0", "false", "off", "no")
+
+
+def _with_server_interpreter(argv):
+    """`python3`/`pip`/`pytest` из песочницы → интерпретатор сервера.
+
+    Правило включается ``TERMINAL_SERVER_PYTHON=0``: тогда программа берётся
+    из PATH, как раньше.
+    """
+    if not argv or not _server_python_enabled():
+        return list(argv or [])
+    program = os.path.basename(str(argv[0] or ""))
+    if program not in _INTERPRETER_PROGRAMS:
+        return list(argv)
+    rest = list(argv[1:])
+    if program in ("python", "python3"):
+        return [sys.executable, *rest]
+    module = "pip" if program.startswith("pip") else program   # pytest
+    return [sys.executable, "-m", module, *rest]
+
+
+_run_lock = threading.Semaphore(MAX_CONCURRENT)
+
+NOVA_HELP = """Встроенная команда nova (работает через песочницу, не через shell):
+  nova search <запрос>          поиск в интернете, печатает источники
+  nova search <запрос> --save   поиск и сохранить выдачу в notes/research/
+  nova read <url>               прочитать страницу и показать текст
+  nova read <url> --save        прочитать и сохранить в notes/research/
+  nova web search <запрос>      то же, что nova search (синоним агента)
+  nova web open <url>           то же, что nova read (синоним агента)
+  nova tools                    список Linux-команд песочницы
+  nova help                     эта справка
+
+Python gateway для реальных функций, инструментов и MCP:
+  python3 -m novamind_cli tools
+  python3 -m novamind_cli call web_search '{"query":"пример"}'
+  python3 -m novamind_cli mcp tools
+  python3 -m novamind_cli mcp call '{"server_id":"...","tool":"...","arguments":{}}'
+
+Поиск идёт теми же бэкендами, что и поиск в чате (searxng, ddg, wiki, ...),
+поэтому свежие данные доступны и терминалу, и агенту. Команды gateway выполняют
+реальный инструмент с текущими правами и возвращают stdout/ошибку, а не анимацию.
+"""
+
+HELP_TEXT = """Доступные команды внутри workspace:
+  ls / cat / head / tail / grep / find / tree / wc / stat / file
+  mkdir / touch / cp / mv / rm / chmod / ln / md5sum / base64 / iconv
+  git status / git log / git diff / git add / git commit / git clone
+  curl -s <url> · wget <url> · ping <host> · dig <host> · ssh <host>
+  python3 script.py · node script.js · pip install · pytest -q
+  ffmpeg · yt-dlp · sqlite3 · tar / zip / unzip · openssl
+  date · whoami · uname · env · ps · du / df · awk · sed · sort
+
+  Пайпы и перенаправления работают:
+    ls -la | grep -v txt | wc -l
+    curl -s https://api.example.com > data.json
+    git log --oneline | head -5
+
+  nova search <запрос> — поиск в интернете
+  nova read <url>      — прочитать страницу
+
+Папка: {workspace}
+Подсказка: файлы «>» создаются только внутри workspace; sudo и $() отключены."""
+
+
+# ───────────────────────── служебное ─────────────────────────
+
+def is_enabled():
+    return os.getenv("TERMINAL_ENABLED", "0") == "1"
+
+
+def is_admin():
+    return bool(session.get("admin_logged_in"))
+
+
+def signed_in():
+    """Вошёл ли пользователь — через Google, другой OAuth или по нику.
+
+    Google кладёт флаги в сессию сам (routes/admin.py), быстрый вход по нику
+    синхронизируется через /api/session/login. Песочница — рабочее окружение,
+    поэтому доступ есть у любого вошедшего, а не только у админа.
+    """
+    return bool(session.get("admin_logged_in")
+                or session.get("nova_google_login")
+                or session.get("nova_signed_in")
+                or session.get("nova_user_nick")
+                or session.get("username"))
+
+
+def can_use_workspace():
+    """Кто может выполнять команды песочницы.
+
+    По умолчанию — любой вошедший (Google, другой OAuth или быстрый вход по
+    нику): команды всё равно идут через allow-list и личную папку. Для жёстких
+    развёртываний есть ``TERMINAL_STRICT_ADMIN=1`` (только администратор) и
+    ``TERMINAL_REQUIRE_GOOGLE=1`` (только проверенный Google-вход).
+    """
+    if is_admin():
+        return True
+    if os.getenv("TERMINAL_STRICT_ADMIN", "0") == "1":
+        return False
+    if (os.getenv("TERMINAL_REQUIRE_GOOGLE", "0") == "1"
+            and not session.get("nova_google_login")):
+        return False
+    return signed_in()
+
+
+def denied(reason):
+    return jsonify({"error": reason, "enabled": is_enabled(), "user": signed_in(),
+                    "admin": is_admin()}), 403
+
+
+def guard():
+    """Единая проверка доступа. None — можно работать, иначе готовый ответ."""
+    if not is_enabled():
+        return denied("Окружение выключено. Включите TERMINAL_ENABLED=1 в .env и перезапустите сервер.")
+    if not can_use_workspace():
+        return denied("Войдите через Google, чтобы пользоваться рабочей папкой.")
+    return None
+
+
+def safe_path(relative=""):
+    """Превращает относительный путь в путь внутри workspace.
+
+    Любая попытка выйти за пределы песочницы → ValueError.
+    """
+    relative = (relative or "").strip()
+    if os.path.isabs(relative):
+        raise ValueError("Абсолютные пути запрещены")
+    relative = relative.lstrip("/")
+    target = os.path.realpath(os.path.join(_ws(), relative))
+    if target != _ws() and not target.startswith(_ws() + os.sep):
+        raise ValueError("Путь выходит за пределы рабочей папки")
+    return target
+
+
+def relative_to_workspace(path):
+    try:
+        return os.path.relpath(path, _ws()).replace(os.sep, "/")
+    except ValueError:
+        return path
+
+
+STARTER_FILES = {
+    "README.md": (
+        "# Рабочая папка NovaMind\n\n"
+        "Здесь живёт «маленький Linux» чата: файлы, терминал, git и задачи.\n\n"
+        "- Всё, что создаётся из терминала, остаётся внутри этой папки.\n"
+        "- Агентный режим работает здесь же: он читает файлы и запускает команды.\n"
+        "- Начните с `python3 hello.py` или `git status`.\n"
+    ),
+    "hello.py": (
+        '"""Первый файл песочницы — запустите: python3 hello.py"""\n\n\n'
+        "def main():\n"
+        '    print("Привет из рабочей папки NovaMind 👋")\n'
+        "    print(\"Здесь работает терминал и агентный режим.\")\n\n\n"
+        'if __name__ == "__main__":\n    main()\n'
+    ),
+    "notes/ideas.md": "# Заметки\n\n- [ ] попробовать агентный режим\n",
+    "data/sample.csv": "name,value\nalpha,1\nbeta,2\ngamma,3\n",
+}
+
+GITIGNORE = "node_modules/\n__pycache__/\n*.pyc\n.env\n"
+
+
+def ensure_workspace():
+    """Создаёт песочницу и заготовки, если их ещё нет."""
+    created = []
+    for relative, content in STARTER_FILES.items():
+        target = os.path.join(_ws(), relative)
+        if not os.path.exists(target):
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            with open(target, "w", encoding="utf-8") as handle:
+                handle.write(content)
+            created.append(relative)
+    gitignore = os.path.join(_ws(), ".gitignore")
+    if not os.path.exists(gitignore):
+        with open(gitignore, "w", encoding="utf-8") as handle:
+            handle.write(GITIGNORE)
+    return created
+
+
+def _outside_path_message(path: str) -> str:
+    """Отказ по пути: по-русски и с готовым решением.
+
+    Раньше здесь было «Path traversal запрещён» — агент и пользователь не
+    понимали, что не так с безобидным ``python -m venv /tmp/x``: песочница
+    работает только внутри рабочей папки и ждёт относительный путь.
+    """
+    return (f"Путь «{path}» не разрешён: команды выполняются только внутри рабочей "
+            f"папки ({_ws()}), и только по относительным путям. "
+            "Пишите, например, «python -m venv venv» или «ls -la app.py».")
+
+
+def _validate_command_paths(segments):
+    """Reject filesystem arguments that could escape the workspace."""
+    network_tools = {"curl", "wget", "ping", "dig", "nslookup", "host", "ssh", "scp", "sftp", "git"}
+    for argv, program in segments:
+        for index, arg in enumerate(argv[1:], 1):
+            if arg in ("-C", "--directory") and index + 1 < len(argv):
+                candidate = argv[index + 1]
+                if (os.path.isabs(candidate) or candidate == ".."
+                        or candidate.startswith("../") or candidate.startswith("..\\")):
+                    raise ValueError(_outside_path_message(candidate))
+                continue
+            if program in network_tools and (arg.startswith(("http://", "https://", "ssh://", "git@")) or "://" in arg):
+                continue
+            if arg.startswith("-"):
+                continue
+            if (os.path.isabs(arg) or arg == ".." or arg.startswith("../")
+                    or arg.startswith("..\\") or "/../" in arg):
+                raise ValueError(_outside_path_message(arg))
+            # Симлинк внутри рабочей папки может указывать наружу: сверяем
+            # реальный путь уже существующих аргументов.
+            candidate = os.path.join(_ws(), arg)
+            if os.path.lexists(candidate):
+                real = os.path.realpath(candidate)
+                if real != _ws() and not real.startswith(_ws() + os.sep):
+                    raise ValueError(f"Ссылка «{arg}» ведёт за пределы рабочей папки "
+                                     f"({_ws()}). Используйте обычный файл внутри неё.")
+
+
+def _tokenize(command):
+    """Разбирает команду на токены, склеивая fd-префикс с оператором.
+
+    `shlex` с punctuation_chars отдаёт `>>`, `&>` одним токеном, но `2>`
+    разбивает на «2» и «>». Здесь такие пары склеиваются обратно, чтобы
+    `cmd 2>err.log` (без пробела) разбиралось как редирект.
+    """
+    # ``punctuation_chars`` is constructor-only on Python 3.11+; assigning
+    # it after construction raises ``AttributeError`` and breaks every
+    # terminal-backed feature (including ``nova search``).
+    lexer = shlex.shlex(command, posix=True, punctuation_chars="|><&")
+    lexer.whitespace_split = True
+    raw = list(lexer)
+    merged, i = [], 0
+    while i < len(raw):
+        token = raw[i]
+        if token == "2" and i + 1 < len(raw) and raw[i + 1] in (">", ">>"):
+            merged.append(token + raw[i + 1])
+            i += 2
+            continue
+        merged.append(token)
+        i += 1
+    return merged
+
+
+def check_command(command):
+    """Проверяет команду: пустая, запрещённая конструкция или не из списка.
+
+    Поддерживает пайпы и перенаправления: «ls -la | grep -v txt | wc -l»,
+    «curl -s https://api.example.com > data.json». Каждая команда цепочки
+    обязана быть в ALLOWED_COMMANDS; файлы «>»/«>>» создаются только
+    внутри workspace. Возвращает ([ (argv, program), … ], [ (fd, mode, path), … ]).
+    """
+    command = (command or "").strip()
+    if not command:
+        raise ValueError("Пустая команда")
+    if len(command) > 2000:
+        raise ValueError("Команда слишком длинная")
+    for bad in FORBIDDEN:
+        if bad in command:
+            raise ValueError(f"Конструкция «{bad.strip()}» отключена — выполняйте команды по одной")
+    for match in _UNQUOTED_SEMICOLON.finditer(command):
+        if match.group(0) == ";":
+            raise ValueError("Символ «;» вне кавычек отключён — выполняйте команды по одной")
+    try:
+        tokens = _tokenize(command)
+    except ValueError as exc:
+        raise ValueError(f"Не удалось разобрать команду: {exc}")
+    if not tokens:
+        raise ValueError("Пустая команда")
+    # Одиночный «&» — фоновый запуск; не поддерживаем.
+    if any(token == "&" for token in tokens):
+        raise ValueError("Фоновый запуск «&» отключён")
+
+    segments = []           # цепочка команд: [[argv], [argv], …]
+    redirects = []          # перенаправления последней команды: (fd, mode, путь)
+    current = []
+
+    def flush():
+        if current:
+            segments.append(current)
+
+    idx = 0
+    while idx < len(tokens):
+        token = tokens[idx]
+        if token == "|":
+            if not current:
+                raise ValueError("Пайп «|» не может стоять в начале команды")
+            flush()
+            current = []
+        elif token in REDIRECT_OPS:
+            if not current:
+                raise ValueError(f"Перенаправление «{token}» без команды")
+            if idx + 1 >= len(tokens):
+                raise ValueError(f"После «{token}» не указано имя файла")
+            target = tokens[idx + 1]
+            mode = "a" if token.endswith(">>") else "w"
+            fd = "stderr" if token.startswith("2") else ("both" if token.startswith("&") else "stdout")
+            redirects.append((fd, mode, target))
+            idx += 1
+            flush()
+            current = []
+        else:
+            current.append(token)
+        idx += 1
+    flush()
+
+    if not segments:
+        raise ValueError("Пустая команда")
+    prepared = []
+    for segment in segments:
+        program = os.path.basename(segment[0])
+        if program not in ALLOWED_COMMANDS:
+            raise ValueError(f"Команда «{program}» не в списке разрешённых")
+        prepared.append((segment, program))
+    _validate_command_paths(prepared)
+    return prepared, redirects
+
+
+def _open_redirect(target, mode):
+    """Открывает файл перенаправления строго внутри workspace."""
+    path = safe_path(target)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    return open(path, mode, encoding="utf-8")
+
+
+def _result(code, stdout, stderr="", elapsed=0, timed_out=False):
+    return {"code": code, "exit_code": code, "stdout": stdout, "stderr": stderr,
+            "duration_ms": elapsed, "timed_out": timed_out}
+
+
+def _slug(text, limit=48):
+    base = re.sub(r"[^a-zA-Z0-9а-яА-ЯёЁ]+", "-", (text or "").strip().lower()).strip("-")
+    return (base[:limit] or "poisk").strip("-")
+
+
+def _save_research(title, body, kind="search"):
+    """Кладёт найденное в песочницу, чтобы результат не потерялся."""
+    ensure_workspace()
+    stamp = time.strftime("%Y-%m-%d")
+    folder = os.path.join(_ws(), "notes", "research")
+    os.makedirs(folder, exist_ok=True)
+    path = os.path.join(folder, f"{stamp}-{_slug(title)}-{kind}.md")
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.write(body)
+    return relative_to_workspace(path)
+
+
+def _format_results(query, results, backend=None, elapsed=0):
+    """Выдача поиска в виде читаемого текста для терминала и агента."""
+    lines = [f'🔎 «{query}» — найдено {len(results)} ({(elapsed / 1000):.1f} c'
+             + (f", {backend}" if backend else "") + ")"]
+    for index, item in enumerate(results, 1):
+        title = item.get("title") or item.get("host") or item.get("url")
+        lines.append(f"{index}. {title}")
+        lines.append(f"   {item.get('url', '')}")
+        if item.get("snippet"):
+            lines.append(f"   {item['snippet'][:240]}")
+    if not results:
+        lines.append("Ничего не нашлось. Попробуйте другой запрос или проверьте бэкенды: /api/search/health")
+    return "\n".join(lines)
+
+
+def nova_search(query, limit=8):
+    """Поиск в интернете из песочницы — те же бэкенды, что и в чате."""
+    from routes.search import search_web          # ленивый импорт: не тянет requests зря
+    started = time.time()
+    results, trace = search_web(query, num=limit)
+    backend = next((entry["backend"] for entry in trace if entry.get("ok")), None)
+    return results, {
+        "query": query, "results": results, "count": len(results),
+        "backend": backend, "trace": trace,
+        "elapsed_ms": int((time.time() - started) * 1000),
+    }
+
+
+def nova_read(url, max_chars=4000):
+    """Чтение страницы из песочницы — тем же зачитывателем, что и поиск."""
+    from routes.search import fetch_page_text
+    started = time.time()
+    fetched = fetch_page_text(url, max_chars=max_chars)
+    # fetch_page_text отдаёт (текст, ошибка); раньше кортеж уходил дальше как «текст»
+    text = fetched[0] if isinstance(fetched, tuple) else fetched
+    return (text or ""), int((time.time() - started) * 1000)
+
+
+def _nova_tools_text() -> str:
+    """Каталог Linux-команд песочницы для `nova tools`."""
+    lines = [
+        f"Доступные Linux-команды песочницы ({len(ALLOWED_COMMANDS)}):",
+        "  " + " ".join(sorted(ALLOWED_COMMANDS)),
+        "",
+        "Пайпы и перенаправления: `ls -la | grep txt`, `echo x > note.txt`.",
+        "Встроенные: nova search/read/help/tools, nova web search/open, nova mcp tools.",
+        "Все функции: python3 -m novamind_cli call <tool> '<JSON>'.",
+        "MCP: python3 -m novamind_cli mcp tools/call '<JSON>'.",
+    ]
+    return "\n".join(lines)
+
+
+def _run_nova(parts, timeout):
+    """Встроенные команды nova: поиск, чтение страниц, каталог инструментов.
+
+    Команды агента (`nova web search`, `nova web open`, `nova mcp tools`,
+    `nova tools`) тоже работают из обычного терминала — пользователь видит
+    тот же интерфейс, что и ИИ в своих шагах.
+    """
+    argv = [str(part) for part in parts]
+    verb = argv[1] if len(argv) > 1 else ""
+    sub = argv[2] if len(argv) > 2 else ""
+
+    if verb == "web" and sub in ("search", "open", "read"):
+        verb = "read" if sub in ("open", "read") else "search"
+        argv = ["nova", verb] + argv[3:]
+    elif verb == "mcp" and sub == "tools":
+        try:
+            import mcp_registry
+            catalog = mcp_registry.format_tools_summary(
+                mcp_registry.connected_tools(), max_tools=40)
+        except Exception as error:  # noqa: BLE001 — каталог необязателен
+            catalog = f"каталог недоступен: {type(error).__name__}"
+        return _result(0, "MCP-инструменты:\n" + str(catalog))
+    elif verb == "call":
+        return _result(2, "", "nova call работает в шагах агента (блок `terminal`): "
+                              "там он делегирует вызов инструменту с проверкой прав.")
+
+    args = [chunk for chunk in argv[2:] if not chunk.startswith("--")]
+    save = "--save" in argv
+    query = " ".join(args).strip()
+
+    if verb == "help" or not verb:
+        return _result(0, NOVA_HELP)
+    if verb == "tools":
+        return _result(0, _nova_tools_text())
+    if not query:
+        return _result(2, "", "nova: укажите запрос. Например: nova search python asyncio")
+
+    if verb == "search":
+        results, meta = nova_search(query)
+        text = _format_results(query, results, meta["backend"], meta["elapsed_ms"])
+        if save and results:
+            body = f'# {query}\n\n_поиск {time.strftime("%Y-%m-%d %H:%M")}_\n\n{text}\n'
+            path = _save_research(query, body, "search")
+            text += f"\n\n💾 сохранено: {path}"
+        return _result(0 if results else 1, text, "" if results else "ничего не найдено",
+                       meta["elapsed_ms"])
+
+    if verb == "read":
+        if not query.startswith(("http://", "https://")):
+            return _result(2, "", "nova read: нужен полный адрес, например https://example.com")
+        text, elapsed = nova_read(query)
+        if save and text:
+            body = f'# {query}\n\n_прочитано {time.strftime("%Y-%m-%d %H:%M")}_\n\n{text}\n'
+            path = _save_research(query, body, "page")
+            text += f"\n\n💾 сохранено: {path}"
+        return _result(0 if text else 1, text or "(страница пустая)", "", elapsed)
+
+    return _result(2, "", f"nova: неизвестная команда «{verb}». Список: nova help")
+
+
+def _python_command(parts):
+    """Parse the deliberately small in-process CLI for registered NovaMind tools."""
+    import json
+    tokens = [str(item) for item in parts]
+    if len(tokens) < 4 or tokens[0] not in {"python", "python3"} \
+            or tokens[1:3] != ["-m", "novamind_cli"]:
+        return None
+    command = tokens[3:]
+    if command == ["tools"]:
+        return "__tools__", "{}"
+    if command == ["mcp", "tools"]:
+        return "__mcp_tools__", "{}"
+    if len(command) == 3 and command[0] == "call":
+        target, body = command[1], command[2]
+    elif len(command) == 3 and command[:2] == ["mcp", "call"]:
+        target, body = "mcp_call", command[2]
+    else:
+        raise ValueError("Ожидается tools, mcp tools, call <tool> '<JSON>' или mcp call '<JSON>'")
+    try:
+        payload = json.loads(body)
+    except (TypeError, ValueError) as error:
+        raise ValueError(f"invalid JSON: {error}") from error
+    if not isinstance(payload, dict):
+        raise ValueError("аргументы должны быть JSON-объектом")
+    return target, json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+
+
+def _run_python_gateway(parts):
+    """Execute ``python3 -m novamind_cli ...`` through the real tool registry.
+
+    This is a built-in terminal command (like ``nova search``), not a visual
+    simulation.  Running it inside the server keeps the current Flask user,
+    workspace and server-side MCP credentials while still returning a normal
+    process-shaped result: exit code, stdout and stderr.
+    """
+    import json
+    import tool_registry
+
+    try:
+        parsed = _python_command([str(item) for item in parts])
+        if parsed is None:
+            return None
+        target, body = parsed
+        tool_registry.bootstrap_default_tools()
+        if target == "__tools__":
+            payload = {item["name"]: item.get("description", "")
+                       for item in tool_registry.tool_schemas()}
+            return _result(0, json.dumps(payload, ensure_ascii=False, indent=2))
+        if target == "__mcp_tools__":
+            import mcp_registry
+            payload = mcp_registry.connected_tools()
+            return _result(0, json.dumps(payload, ensure_ascii=False, indent=2))
+
+        registry_name = tool_registry.ACTION_TO_TOOL.get(target, target)
+        try:
+            arguments = json.loads(body) if str(body).strip() else {}
+        except ValueError as exc:
+            return _result(2, "", f"invalid JSON: {exc}; исправьте структуру запроса и повторите")
+        if not isinstance(arguments, dict):
+            return _result(2, "", "аргументы должны быть JSON-объектом")
+        result = tool_registry.call_tool(registry_name, **arguments)
+        ok = not (isinstance(result, dict) and result.get("ok") is False)
+        text = json.dumps(result, ensure_ascii=False, indent=2, default=str)
+        return _result(0 if ok else 1, text if ok else "", "" if ok else text)
+    except (ValueError, TypeError) as exc:
+        return _result(2, "", f"novamind_cli: {exc}")
+    except Exception as exc:  # noqa: BLE001 — terminal gets the real error
+        return _result(1, "", f"novamind_cli: {type(exc).__name__}: {exc}")
+
+
+def _sandbox_env():
+    """Окружение песочницы: HOME указывает в workspace, git настроен."""
+    return {
+        "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+        "HOME": _ws(),
+        "LANG": os.environ.get("LANG", "C.UTF-8"),
+        "TERM": "dumb",
+        "PYTHONDONTWRITEBYTECODE": "1",
+        # В песочнице нет ~/.gitconfig — без этого git commit
+        # ругается «Author identity unknown» и не проходит.
+        "GIT_AUTHOR_NAME": "NovaMind",
+        "GIT_AUTHOR_EMAIL": "novamind@localhost",
+        "GIT_COMMITTER_NAME": "NovaMind",
+        "GIT_COMMITTER_EMAIL": "novamind@localhost",
+    }
+
+
+def run_command(command, timeout=None, cancel=None):
+    """Выполняет команду в песочнице. Поддерживаются пайпы и «>»/«>>».
+
+    Каждый сегмент цепочки проверяется отдельно; пользователь получает
+    вывод последней команды, файлы перенаправления создаются только
+    внутри workspace.
+
+    `cancel` — threading.Event кнопки «Стоп»: как только он взведён,
+    вся цепочка процессов снимается (SIGKILL по группе), а результат
+    помечается как отменённый.
+    """
+    prepared, redirects = check_command(command)
+    ensure_workspace()
+    if len(prepared) == 1 and prepared[0][1] == "nova":    # встроенная команда — без subprocess
+        return _run_nova(prepared[0][0], timeout)
+    if len(prepared) == 1 and prepared[0][1] in ("python", "python3"):
+        gateway = _run_python_gateway(prepared[0][0])
+        if gateway is not None:
+            return gateway
+    timeout = float(timeout or COMMAND_TIMEOUT)
+    if not _run_lock.acquire(blocking=False):
+        raise RuntimeError("Занято: предыдущая команда ещё выполняется")
+    started = time.time()
+    processes = []
+    handles = []
+    killed = {"value": False}
+
+    def kill_all():
+        killed["value"] = True
+        for proc in processes:
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            except (ProcessLookupError, PermissionError, OSError):
+                proc.kill()
+
+    cancelled = {"value": False}
+    watcher = None
+    if cancel is not None:
+        def watch_cancel():
+            # Ждём флаг отмены и снимаем цепочку, не дожидаясь таймаута.
+            while not cancel.wait(0.2):
+                if not processes:
+                    continue
+            cancelled["value"] = True
+            kill_all()
+        watcher = threading.Thread(target=watch_cancel, daemon=True)
+        watcher.start()
+
+    try:
+        # Сначала открываем файлы перенаправления — если путь неверный,
+        # ни один процесс ещё не запущен и убивать нечего.
+        stdout_handle = None
+        stderr_handle = None
+        stdout_target = None
+        for fd, mode, target in redirects:
+            handle = _open_redirect(target, mode)
+            handles.append(handle)
+            if fd in ("stdout", "both"):
+                stdout_handle, stdout_target = handle, target
+            if fd in ("stderr", "both"):
+                stderr_handle = handle
+
+        env = _sandbox_env()
+        last = len(prepared) - 1
+        for index, (raw_segment, program) in enumerate(prepared):
+            segment = _with_server_interpreter(raw_segment)
+            stdin = processes[-1].stdout if processes else subprocess.DEVNULL
+            stdout = stdout_handle if (index == last and stdout_handle) else subprocess.PIPE
+            stderr = stderr_handle if (index == last and stderr_handle) else subprocess.PIPE
+            try:
+                proc = subprocess.Popen(
+                    segment,
+                    cwd=_ws(),
+                    stdin=stdin,
+                    stdout=stdout,
+                    stderr=stderr,
+                    env=env,
+                    start_new_session=True,      # свой pgid — цепочку целиком снимаем
+                )
+            except FileNotFoundError:
+                kill_all()
+                return {"code": 127, "stdout": "",
+                        "stderr": f"{program}: команда не установлена",
+                        "duration_ms": int((time.time() - started) * 1000),
+                        "timed_out": False}
+            except Exception as exc:                  # noqa: BLE001 — текст ошибки пользователю
+                kill_all()
+                return {"code": 126, "stdout": "", "stderr": str(exc),
+                        "duration_ms": int((time.time() - started) * 1000),
+                        "timed_out": False}
+            if index > 0:
+                # Родитель обязан закрыть свою копию pipe, иначе следующая
+                # команда не увидит EOF и зависнет.
+                try:
+                    processes[-1].stdout.close()
+                except Exception:                       # noqa: BLE001
+                    pass
+            processes.append(proc)
+
+        # Таймер снимает всю цепочку: communicate() после kill возвращается штатно.
+        timer = threading.Timer(timeout, kill_all)
+        timer.start()
+        try:
+            stdout, stderr = processes[-1].communicate(timeout=timeout + 2)
+            for proc in processes[:-1]:
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+        except subprocess.TimeoutExpired:
+            kill_all()
+            stdout, stderr = processes[-1].communicate()
+        finally:
+            timer.cancel()
+    finally:
+        if watcher is not None:
+            watcher.join(timeout=0.5)
+        for handle in handles:
+            try:
+                handle.close()
+            except OSError:
+                pass
+        _run_lock.release()
+    timed_out = killed["value"]
+
+    def decode(blob):
+        text = (blob or b"").decode("utf-8", "replace")
+        return text[:MAX_OUTPUT] + ("\n… вывод обрезан" if len(text) > MAX_OUTPUT else "")
+
+    out = decode(stdout)
+    if stdout_target and not out:
+        out = f"(вывод записан в файл: {stdout_target})"
+    return {
+        "code": processes[-1].returncode if processes[-1].returncode is not None else -1,
+        "stdout": out,
+        "stderr": decode(stderr),
+        "duration_ms": int((time.time() - started) * 1000),
+        "timed_out": timed_out,
+        "cancelled": bool(cancelled["value"]),
+    }
+
+
+def _agent_server_guard(command):
+    """Reject common long-lived server launches; direct users to in-process smoke tests."""
+    try:
+        prepared, _redirects = check_command(command)
+    except ValueError:
+        return ""
+    if not prepared:
+        return ""
+    argv, program = prepared[0]
+    if program in {"python", "python3"} and "-m" in argv:
+        module_index = argv.index("-m") + 1
+        if module_index < len(argv) and argv[module_index] in {"http.server", "uvicorn", "gunicorn"}:
+            return "Запуск сервера из агента запрещён: используйте Flask test_client или отдельный deploy-процесс."
+    if program not in {"python", "python3"}:
+        return ""
+    script = next((part for part in argv[1:] if not part.startswith("-")), "")
+    if not script or not script.endswith(".py"):
+        return ""
+    try:
+        with open(safe_path(script), "r", encoding="utf-8", errors="replace") as handle:
+            source = handle.read(200_000)
+    except (OSError, ValueError):
+        return ""
+    if re.search(r"(?m)\b(?:app|application)\s*\.\s*run\s*\(|\bserve_forever\s*\(", source):
+        return "Запуск веб-сервера из агента запрещён: используйте Flask test_client для smoke-проверок."
+    return ""
+
+
+def _agent_timeout(command, requested):
+    """Give explicit package/bootstrap operations more room, with a hard ceiling."""
+    try:
+        prepared, _redirects = check_command(command)
+    except ValueError:
+        return max(0.1, min(float(requested or 12), 120.0))
+    words = [part.lower() for argv, _program in prepared for part in argv]
+    slow = ((words and words[0] in {"pip", "pip3"} and "install" in words)
+            or ("-m" in words and "venv" in words))
+    cap = 120.0 if slow else 45.0
+    return max(float(requested or 12), min(cap, 120.0))
+
+
+def run_agent(command, timeout=12, cancel=None):
+    """Run one policy-checked workspace command with bounded time and honest errors."""
+    try:
+        server_error = _agent_server_guard(command)
+        if server_error:
+            raise ValueError(server_error)
+        return run_command(command, timeout=_agent_timeout(command, timeout), cancel=cancel)
+    except (ValueError, RuntimeError) as exc:
+        return {"code": 2, "stdout": "", "stderr": str(exc), "duration_ms": 0,
+                "timed_out": False, "cancelled": False}
+
+
+# ───────────────────────── маршруты ─────────────────────────
+
+@terminal_bp.route("/api/terminal/status")
+def terminal_status():
+    """Доступен ли терминал и что уже есть в песочнице."""
+    enabled, user = is_enabled(), signed_in()
+    allowed = can_use_workspace()
+    payload = {"enabled": enabled, "user": user, "admin": is_admin(),
+               "available": enabled and allowed,
+               "workspace": relative_to_workspace(_ws())}
+    if not (enabled and allowed):
+        payload["hint"] = ("Включите TERMINAL_ENABLED=1 в .env и перезапустите сервер"
+                           if not enabled else "Войдите в аккаунт, чтобы открыть рабочую папку")
+        return jsonify(payload)
+    ensure_workspace()
+    payload["cwd"] = _ws()
+    payload["git"] = bool(os.path.isdir(os.path.join(_ws(), ".git")))
+    payload["commands"] = sorted(ALLOWED_COMMANDS)
+    return jsonify(payload)
+
+
+@terminal_bp.route("/api/terminal/bootstrap", methods=["POST"])
+def terminal_bootstrap():
+    """Создаёт песочницу заново (не трогая существующие файлы)."""
+    if (blocked := guard()):
+        return blocked
+    return jsonify({"created": ensure_workspace(), "workspace": relative_to_workspace(_ws())})
+
+
+@terminal_bp.route("/api/terminal/files")
+def terminal_files():
+    """Дерево файлов рабочей папки (скрытые и служебные прячем)."""
+    if (blocked := guard()):
+        return blocked
+    ensure_workspace()
+    skip = {".git", "node_modules", "__pycache__", ".venv", ".cache"}
+    limit = int(request.args.get("limit", 400))
+    root = safe_path(request.args.get("path", ""))
+    items = []
+    for current, dirs, files in os.walk(root):
+        dirs[:] = sorted(d for d in dirs if d not in skip and not d.startswith("."))
+        for name in sorted(files):
+            if name.startswith("."):
+                continue
+            full = os.path.join(current, name)
+            try:
+                stat = os.stat(full)
+            except OSError:
+                continue
+            items.append({
+                "path": relative_to_workspace(full),
+                "name": name,
+                "size": stat.st_size,
+                "dir": os.path.dirname(relative_to_workspace(full)) or ".",
+            })
+            if len(items) >= limit:
+                return jsonify({"files": items, "truncated": True, "workspace": relative_to_workspace(_ws())})
+    return jsonify({"files": items, "truncated": False, "workspace": relative_to_workspace(_ws())})
+
+
+@terminal_bp.route("/api/terminal/file", methods=["POST"])
+def terminal_file():
+    """Чтение или запись файла внутри песочницы."""
+    if (blocked := guard()):
+        return blocked
+    data = request.get_json(silent=True) or {}
+    action = (data.get("action") or "read").lower()
+    try:
+        target = safe_path(data.get("path", ""))
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+
+    if action == "read":
+        if not os.path.isfile(target):
+            return jsonify({"error": "Файла нет"}), 404
+        if os.path.getsize(target) > 200_000:
+            return jsonify({"error": "Файл слишком большой для просмотра"}), 400
+        with open(target, "r", encoding="utf-8", errors="replace") as handle:
+            return jsonify({"path": relative_to_workspace(target), "content": handle.read()[:60000]})
+
+    if action == "write":
+        content = str(data.get("content") or "")
+        if len(content) > 200_000:
+            return jsonify({"error": "Слишком большой файл"}), 400
+        if os.path.isdir(target):
+            return jsonify({"error": "Это папка"}), 400
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        with open(target, "w", encoding="utf-8") as handle:
+            handle.write(content)
+        return jsonify({"path": relative_to_workspace(target), "bytes": len(content.encode("utf-8"))})
+
+    return jsonify({"error": "Неизвестное действие"}), 400
+
+
+@terminal_bp.route("/api/terminal/run", methods=["POST"])
+def terminal_run():
+    """Выполняет команду в песочнице.
+
+    Пайпы и «>»/«>>» разрешены: check_command разбирает цепочку по сегментам
+    и проверяет путь редиректа. Блокируем только склейку команд (&&, ||),
+    подстановки и фоновый запуск — их песочница не поддерживает.
+    """
+    if (blocked := guard()):
+        return blocked
+    data = request.get_json(silent=True) or {}
+    command = data.get("command", "")
+    if any(token in str(command) for token in ("&&", "||", "`", "$(", "${")):
+        return jsonify({"error": "Составные конструкции &&/||/`/$( отключены", "command": command}), 400
+    try:
+        result = run_command(command, timeout=data.get("timeout"))
+    except ValueError as exc:
+        # Traversal errors remain a structured command result so agent/tool
+        # callers can recover; malformed shell constructs keep a 400.
+        if ".." in str(command):
+            return jsonify({**_result(2, "", str(exc)), "command": command,
+                            "cwd": relative_to_workspace(_ws())})
+        return jsonify({"error": str(exc), "command": command}), 400
+    except RuntimeError as exc:
+        return jsonify({"error": str(exc), "command": command}), 429
+    result["command"] = command
+    result["cwd"] = relative_to_workspace(_ws())
+    return jsonify(result)
+
+
+@terminal_bp.route("/api/terminal/help")
+def terminal_help():
+    if (blocked := guard()):
+        return blocked
+    return jsonify({"text": HELP_TEXT.format(workspace=relative_to_workspace(_ws())),
+                    "commands": sorted(ALLOWED_COMMANDS)})
+
+
+@terminal_bp.route("/api/terminal/git")
+def terminal_git():
+    """Структурированное состояние git — для панели, без ручной набора команд."""
+    if (blocked := guard()):
+        return blocked
+    if not os.path.isdir(os.path.join(_ws(), ".git")):
+        return jsonify({"repo": False, "message": "Это не git-репозиторий. Выполните: git init"})
+
+    def git(*args):
+        result = run_agent("git " + " ".join(shlex.quote(a) for a in args), timeout=8)
+        return (result["stdout"] or result["stderr"]).strip()
+
+    branch = git("rev-parse", "--abbrev-ref", "HEAD") or "?"
+    status = git("status", "--short")
+    changes = []
+    for line in status.splitlines()[:60]:
+        match = re.match(r"^\s*([A-Z?!]{1,2})\s+(.+)$", line)
+        if match:
+            changes.append({"status": match.group(1).strip(), "path": match.group(2).strip()})
+    return jsonify({
+        "repo": True,
+        "branch": branch,
+        "clean": not changes,
+        "changes": changes,
+        "last": git("log", "-1", "--pretty=format:%h %s (%an, %ad)", "--date=short"),
+    })
+
+
+# ───────────────────── поиск как функция окружения ─────────────────────
+# Интернет доступен не отдельной кнопкой, а через ту же песочницу:
+# терминал (nova search), агент ({"action":"search"}) и вкладка «Поиск» панели.
+# Поиск по песочнице — обычный grep, тоже через окружение.
+
+@terminal_bp.route("/api/linux/search", methods=["POST"])
+def linux_search():
+    """Поиск в интернете (mode=web) или по файлам песочницы (mode=code)."""
+    if (blocked := guard()):
+        return blocked
+    data = request.get_json(silent=True) or {}
+    query = (data.get("query") or "").strip()
+    if not query:
+        return jsonify({"error": "Пустой запрос"}), 400
+    mode = (data.get("mode") or "web").lower()
+
+    if mode == "code":
+        return jsonify(_search_in_workspace(query, int(data.get("limit", 40))))
+
+    results, meta = nova_search(query, limit=int(data.get("limit", 8)))
+    return jsonify({
+        "mode": "web",
+        "query": query,
+        "results": results,
+        "count": len(results),
+        "backend": meta["backend"],
+        "trace": meta["trace"],
+        "elapsed_ms": meta["elapsed_ms"],
+    })
+
+
+@terminal_bp.route("/api/linux/save", methods=["POST"])
+def linux_save():
+    """Сохраняет найденное в песочницу — чтобы находки не пропали."""
+    if (blocked := guard()):
+        return blocked
+    data = request.get_json(silent=True) or {}
+    query = (data.get("query") or "Заметка").strip()
+    results = data.get("results") if isinstance(data.get("results"), list) else []
+
+    lines = [f"# {query}", "", f"_сохранено {time.strftime('%Y-%m-%d %H:%M')} из панели Linux_", ""]
+    if results:
+        lines.append("## Источники")
+        lines.append("")
+        for index, item in enumerate(results, 1):
+            title = item.get("title") or item.get("url") or "без названия"
+            lines.append(f"{index}. [{title}]({item.get('url', '')}) — {item.get('host', '')}")
+            if item.get("snippet"):
+                lines.append(f"   {item['snippet']}")
+        lines.append("")
+    note = (data.get("note") or "").strip()
+    if note:
+        lines += ["## Заметка", "", note, ""]
+    path = _save_research(query, "\n".join(lines), "notes")
+    return jsonify({"path": path})
+
+
+@terminal_bp.route("/api/linux/read", methods=["POST"])
+def linux_read():
+    """Читает страницу источника — тем же зачитывателем, что и поиск в чате."""
+    if (blocked := guard()):
+        return blocked
+    data = request.get_json(silent=True) or {}
+    url = (data.get("url") or "").strip()
+    if not url.startswith(("http://", "https://")):
+        return jsonify({"error": "Нужен полный адрес страницы"}), 400
+    text, elapsed = nova_read(url, max_chars=int(data.get("limit", 6000)))
+    return jsonify({"url": url, "text": text, "elapsed_ms": elapsed, "bytes": len(text)})
+
+
+def _search_in_workspace(query, limit=40):
+    """grep по рабочей папке: ищем то же слово, что и в интернете, но локально."""
+    ensure_workspace()
+    pattern = query.split()[0][:60]
+    result = run_agent(f'grep -rn "{pattern}" .', timeout=12)
+    output = (result["stdout"] or "") + (result["stderr"] or "")
+    matches = []
+    for line in output.splitlines()[:limit]:
+        parts = line.split(":", 2)
+        if len(parts) < 3:
+            continue
+        path, line_no, snippet = parts
+        path = path.strip().lstrip("./")
+        if not path or path.startswith(".."):
+            continue
+        matches.append({
+            "path": path,
+            "line": int(line_no) if line_no.strip().isdigit() else 0,
+            "snippet": snippet.strip()[:300],
+            "url": "",
+        })
+    return {
+        "mode": "code",
+        "query": query,
+        "results": matches,
+        "count": len(matches),
+        "truncated": len(output.splitlines()) > limit,
+    }
+
+
+# ───────────────────────── задачи ─────────────────────────
+
+tasks_bp = Blueprint("tasks", __name__)
+
+
+def _task_owner_ok():
+    """Задачи доступны любому вошедшему: это личный список, не управление сервером."""
+    return True
+
+
+@tasks_bp.route("/api/tasks")
+def tasks_list():
+    if not _task_owner_ok():
+        return jsonify({"error": "Нужен вход"}), 403
+    import database
+    return jsonify({"tasks": database.list_tasks(status=request.args.get("status"))})
+
+
+@tasks_bp.route("/api/tasks", methods=["POST"])
+def tasks_create():
+    if not _task_owner_ok():
+        return jsonify({"error": "Нужен вход"}), 403
+    data = request.get_json(silent=True) or {}
+    title = (data.get("title") or "").strip()
+    if not title:
+        return jsonify({"error": "Пустое название задачи"}), 400
+    import database
+    task = database.create_task(
+        title=title,
+        detail=(data.get("detail") or "").strip(),
+        source=data.get("source") if data.get("source") in ("user", "agent") else "user",
+        steps=data.get("steps") if isinstance(data.get("steps"), list) else None,
+    )
+    return jsonify({"task": task})
+
+
+@tasks_bp.route("/api/tasks/<task_id>", methods=["PATCH"])
+def tasks_update(task_id):
+    if not _task_owner_ok():
+        return jsonify({"error": "Нужен вход"}), 403
+    data = request.get_json(silent=True) or {}
+    import database
+    if data.get("title") is not None and not str(data["title"]).strip():
+        return jsonify({"error": "Пустое название задачи"}), 400
+    task = database.update_task(
+        task_id,
+        title=(data.get("title") or "").strip() or None,
+        detail=data.get("detail"),
+        status=data.get("status") if data.get("status") in ("todo", "doing", "done") else None,
+    )
+    if not task:
+        return jsonify({"error": "Задача не найдена"}), 404
+    return jsonify({"task": task})
+
+
+@tasks_bp.route("/api/tasks/<task_id>/steps", methods=["POST"])
+def tasks_step(task_id):
+    if not _task_owner_ok():
+        return jsonify({"error": "Нужен вход"}), 403
+    data = request.get_json(silent=True) or {}
+    import database
+    task = database.append_task_step(
+        task_id,
+        title=data.get("title") or "Шаг",
+        status=data.get("status") if data.get("status") in ("todo", "doing", "done", "error") else "doing",
+        log=data.get("log") or "",
+    )
+    if not task:
+        return jsonify({"error": "Задача не найдена"}), 404
+    return jsonify({"task": task})
+
+
+@tasks_bp.route("/api/tasks/<task_id>", methods=["DELETE"])
+def tasks_delete(task_id):
+    if not _task_owner_ok():
+        return jsonify({"error": "Нужен вход"}), 403
+    import database
+    database.delete_task(task_id)
+    return jsonify({"deleted": task_id})

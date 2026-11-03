@@ -1,0 +1,35 @@
+__pycache__/
+*.pyc
+.env
+runtime_settings.json
+generated_media/
+workspace/
+workspace_data/
+user_skills/
+venv/
+*.log
+.DS_Store
+ai_settings.json
+novamind_chats.db
+.venv/
+node_modules/
+package-lock.json
+.pytest_cache/
+
+# Секреты и локальные данные: не должны попадать в git
+.ssh/
+uploads/
+*.db
+.env.*
+!.env.example
+mcp_connections.json
+.npm/
+
+*.bak
+.session_secret
+.patch_backup_*/
+
+# Трассы агента (telemetry.py) и база знаний (knowledge.py) — локальные данные
+traces/
+knowledge.db
+evals/report.json

@@ -1,0 +1,309 @@
+<!DOCTYPE html>
+<html lang="ru" data-glass-theme="aurora">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <meta name="theme-color" content="#070713" />
+  <title>NovaMind · Liquid Glass</title>
+  <link rel="stylesheet" href="/static/liquid-glass.css">
+  <link rel="stylesheet" href="/static/style.css?v=speech1">
+  <link rel="stylesheet" href="/static/workspace.css">
+  <link rel="stylesheet" href="/static/agent-controls.css">
+</head>
+<body>
+
+<!-- Живой фон: зерно + виньетка поверх aurora-слоёв -->
+<div class="lg-grain" aria-hidden="true"></div>
+<div class="lg-vignette" aria-hidden="true"></div>
+
+<div class="app">
+
+  <div class="overlay" id="overlay" onclick="closeSidebar()"></div>
+
+  <!-- ═══════════════ БОКОВАЯ ПАНЕЛЬ ═══════════════ -->
+  <aside class="sidebar" id="sidebar">
+
+    <div class="sidebar-header">
+      <div class="logo">
+        <img src="/static/images/image.png" alt="NovaMind" class="logo-img">
+        <div>
+          <div class="logo-text">Khirad</div>
+          <div class="logo-sub">Assistant</div>
+        </div>
+      </div>
+      <button class="btn-new-chat" onclick="newChat()">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+        Новый диалог
+      </button>
+    </div>
+
+    <div class="sidebar-body">
+      <div class="nav-label">Основные</div>
+
+      <div class="nav-item active" onclick="setActive(this, 'chat')">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+        Чат
+      </div>
+
+      <div class="nav-item" onclick="activateMode({prefix: '/search ', label: '🔎 Веб-поиск', placeholder: 'Введите запрос для поиска...'}); closeSidebar();">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+        Веб-поиск
+        <span class="nav-badge">Beta</span>
+      </div>
+
+      <div class="nav-item" onclick="activateMode({prefix: '/image ', label: '🎨 Генерация изображений', placeholder: 'Опишите изображение для генерации...'}); closeSidebar();">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
+        Генерация изображений
+      </div>
+
+      <div class="nav-item" onclick="activateMode({prefix: '/code ', label: '💻 Помощник кода', placeholder: 'Опишите, какой код создать...'}); closeSidebar();">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
+        Помощник кода
+      </div>
+
+      <div class="nav-item" onclick="activateMode({prefix: 'Создай skill: ', label: '🧩 Создание skill', placeholder: 'Опишите, чему должен научиться skill...'}); closeSidebar();">
+        <span style="font-size:16px;">🧩</span>
+        Создать skill
+      </div>
+
+      <div class="nav-item" onclick="openMemory(); closeSidebar();" role="button" tabindex="0">
+        <span style="font-size:16px;">🧠</span>
+        Память
+      </div>
+
+      <div class="nav-label">Сервисы</div>
+
+      <div class="nav-item" onclick="activateMode({prefix: '/services weather ', label: '🌤 Погода', placeholder: 'Введите город для погоды...'}); closeSidebar();">
+        <span style="font-size:16px;">🌤️</span> Погода
+      </div>
+      <div class="nav-item" onclick="activateMode({prefix: '/services currency ', label: '💱 Курс валют', placeholder: 'Введите валюты (USD RUB)...'}); closeSidebar();">
+        <span style="font-size:16px;">💱</span> Курс валют
+      </div>
+      <div class="nav-item" onclick="activateMode({prefix: '/services wiki ', label: '📚 Википедия', placeholder: 'Введите запрос для Википедии...'}); closeSidebar();">
+        <span style="font-size:16px;">📚</span> Википедия
+      </div>
+
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-top:6px;">
+        <div class="nav-label" style="margin:0;">История чатов</div>
+        <button class="history-new-btn" type="button" onclick="startNewChat()" title="Новый чат">+ Новый</button>
+      </div>
+      <div id="historyContainer"></div>
+    </div>
+
+    <!-- ═══════════════ ФУТЕР БОКОВОЙ ПАНЕЛИ ═══════════════ -->
+    <div class="sidebar-footer">
+      <a href="/admin/login" class="user-card" id="admin-link" style="display: none; text-decoration: none; color: inherit;">
+        <div class="user-avatar">⚙️</div>
+        <div>
+          <div class="user-name">Панель управления</div>
+          <div class="user-plan">Настройки и ключи</div>
+        </div>
+      </a>
+
+      <div class="user-card" id="user-card" onclick="openSettings()" role="button" tabindex="0" title="Профиль">
+        <div class="user-avatar">👤</div>
+        <div style="flex: 1;">
+          <div class="user-name" id="display-nick">Пользователь</div>
+          <div class="user-plan" id="display-provider">Базовый план</div>
+        </div>
+        <button onclick="event.stopPropagation(); logout()" class="logout-btn">Выйти</button>
+      </div>
+
+      <div class="lang-switch" style="display:flex;gap:6px;padding:8px 2px 2px;">
+        <button type="button" data-lang="tg" style="flex:1;padding:6px 4px;border-radius:9px;border:1px solid var(--glass-border);background:transparent;color:inherit;font-size:11px;cursor:pointer;">Тоҷикӣ</button>
+        <button type="button" data-lang="ru" style="flex:1;padding:6px 4px;border-radius:9px;border:1px solid var(--glass-border);background:transparent;color:inherit;font-size:11px;cursor:pointer;">Русский</button>
+        <button type="button" data-lang="en" style="flex:1;padding:6px 4px;border-radius:9px;border:1px solid var(--glass-border);background:transparent;color:inherit;font-size:11px;cursor:pointer;">English</button>
+      </div>
+    </div>
+
+  </aside>
+
+  <!-- ═══════════════ MAIN ═══════════════ -->
+  <main class="main">
+
+    <!-- Top Bar -->
+    <header class="topbar">
+      <button class="menu-btn" id="btnNav" onclick="toggleSidebar()" aria-label="Открыть боковую панель" aria-expanded="false" title="Открыть боковую панель">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
+      </button>
+
+      <div class="topbar-title">
+        <span class="lg-dot pulse" id="statusDot" title="Состояние ИИ-движка"></span>
+        <span id="statusText">AI Ассистент</span>
+      </div>
+
+      <div class="topbar-actions">
+
+        <span class="usage-chip" id="usageChip" title="Расход токенов в этом чате"
+              onclick="refreshUsage(true)" role="button" tabindex="0">≈ 0 ток.</span>
+
+        <button class="icon-btn" id="btnSettings" title="Настройки AI (только администратор)"
+                onclick="openSettings()" hidden>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="14" cy="13.4" r="2"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06-1.7 1.7-.06-.06a1.7 1.7 0 0 0-1.88-.34 1.7 1.7 0 0 0-1 1.55V20h-2.4v-.21a1.7 1.7 0 0 0-1-1.55 1.7 1.7 0 0 0-1.88.34l-.06.06-1.7-1.7.06-.06A1.7 1.7 0 0 0 8.6 15a1.7 1.7 0 0 0-1.55-1H6.8v-2.4h.25a1.7 1.7 0 0 0 1.55-1 1.7 1.7 0 0 0-.34-1.88L8.2 8.66l1.7-1.7.06.06a1.7 1.7 0 0 0 1.88.34 1.7 1.7 0 0 0 1-1.55V5.6h2.4v.21a1.7 1.7 0 0 0 1 1.55 1.7 1.7 0 0 0 1.88-.34l.06-.06 1.7 1.7-.06.06a1.7 1.7 0 0 0-.34 1.88 1.7 1.7 0 0 0 1.55 1h.21V14h-.21a1.7 1.7 0 0 0-1.55 1z"/></svg>
+        </button>
+
+        <button class="icon-btn" title="Очистить чат" onclick="clearChat()">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4h6v2"/></svg>
+        </button>
+      </div>
+    </header>
+
+    <!-- Chat -->
+    <div class="chat-container" id="chatContainer">
+      <div class="welcome" id="welcomeScreen">
+        <img src="/static/images/image.png" alt="Khirad" class="welcome-logo">
+        <h1>Привет! Я <span>Khirad</span></h1>
+        <p>Просто напишите, что нужно. Я сам решу, как это сделать: отвечу, найду в интернете, нарисую картинку, озвучу текст, сделаю видео или поработаю в Linux.</p>
+      </div>
+    </div>
+
+    <!-- Input Area -->
+    <div class="input-area">
+      <div class="input-toolbar">
+        <button class="toolbar-btn" id="btn-web-search" onclick="toggleWebSearch()" title="Автопоиск: ИИ сначала ищет в интернете и отвечает с источниками">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+          <span id="searchBtnText">Поиск</span>
+          <span class="lg-dot" id="searchHealthDot" title="Состояние поисковых бэкендов"></span>
+        </button>
+
+        <button class="toolbar-btn" id="btn-reasoning" onclick="toggleReasoning()" title="Показывать ход рассуждений модели">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/><circle cx="12" cy="12" r="10"/></svg>
+          <span id="reasoningBtnText">Рассуждение</span>
+        </button>
+
+        <button class="toolbar-btn" id="btn-attach" onclick="toggleAttachMenu()">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
+          <span>Прикрепить файл</span>
+        </button>
+
+        <div class="attach-dropdown" id="attachDropdown">
+          <button class="toolbar-btn" onclick="attachImage()">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
+            Изображение
+          </button>
+          <button class="toolbar-btn" onclick="attachDocument()">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+            Файл
+          </button>
+          <button class="toolbar-btn" onclick="attachAudio()">🎧 Аудио</button>
+          <button class="toolbar-btn" onclick="attachVideo()">🎬 Видео</button>
+        </div>
+
+        <button class="toolbar-btn" id="btn-calm" onclick="toggleCalmMotion()" title="Отключить фоновые анимации">✨ <span>Анимации</span></button>
+        <button class="toolbar-btn" type="button" onclick="toggleWorkspace(true)" title="Открыть файлы этой сессии">📁 <span>Файлы</span></button>
+      </div>
+
+      <div class="mode-active" id="modeActiveBar" hidden>
+        <span class="mode-active-dot"></span>
+        <span class="mode-active-text" id="modeActiveText"></span>
+        <button class="mode-active-clear" type="button" onclick="clearInputMode()" title="Выключить режим">×</button>
+      </div>
+
+      <div class="input-wrapper">
+        <textarea id="chat-input" placeholder="Напишите сообщение..." rows="1" data-default-placeholder="Напишите сообщение..." onkeydown="handleKey(event)" oninput="autoResize(this); document.getElementById('sendBtn').disabled = !this.value.trim()"></textarea>
+
+        <div class="input-actions">
+          <button class="speak-btn" id="btn-speak" type="button" onclick="speakLastAnswer()"
+                  title="Озвучить последний ответ" aria-label="Озвучить последний ответ" disabled>
+            <span data-speech-icon aria-hidden="true">🔊</span>
+            <span class="speak-btn-text" id="speakBtnText">Озвучить</span>
+          </button>
+
+          <button class="voice-btn" id="voiceBtn" onclick="toggleVoice()" title="Голосовой ввод">
+            <svg id="voiceIcon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
+              <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
+              <line x1="12" y1="19" x2="12" y2="23"/>
+              <line x1="8" y1="23" x2="16" y2="23"/>
+            </svg>
+            <div class="voice-tooltip" id="voiceTooltip">Нажмите для записи</div>
+          </button>
+
+          <button class="send-btn" id="sendBtn" onclick="sendMessage()" title="Отправить (Enter)">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+              <line x1="22" y1="2" x2="11" y2="13"/>
+              <polygon points="22 2 15 22 11 13 2 9 22 2"/>
+            </svg>
+          </button>
+        </div>
+      </div>
+
+      <div class="input-footer">
+        Khirad может ошибаться. Проверяйте важную информацию
+      </div>
+    </div>
+
+  </main>
+</div>
+
+
+
+
+
+
+  <aside class="agent-workspace" id="agentWorkspace" aria-hidden="true">
+    <div class="agent-workspace-head"><strong>Файлы этой сессии</strong>
+      <div><a id="workspaceZip" href="#" download>Скачать ZIP</a>
+        <button type="button" onclick="toggleWorkspace(false)" aria-label="Закрыть">✕</button></div>
+    </div>
+    <nav class="workspace-tabs"><button type="button" onclick="showWorkspaceTab('files')">Файлы</button><button type="button" onclick="showWorkspaceTab('diff')">GitHub · Diff</button></nav>
+    <section id="workspaceTabFiles"><div id="workspaceFiles" class="agent-workspace-files">Откройте чат, чтобы посмотреть его файлы.</div>
+      <pre id="workspacePreview" class="agent-workspace-preview" hidden></pre></section>
+    <section id="workspaceTabDiff" hidden><form id="githubCloneForm" class="workspace-github-form">
+      <label for="githubRepository">Репозиторий GitHub</label><input id="githubRepository" type="url" placeholder="https://github.com/owner/repo" required>
+      <button type="submit">Открыть копию в workspace</button></form>
+      <div class="workspace-github-actions"><button type="button" onclick="refreshWorkspaceDiff()">Обновить Diff</button><button type="button" onclick="commitWorkspaceChanges()">Коммит</button><button type="button" onclick="publishWorkspaceChanges()">Пуш и PR…</button></div>
+      <div id="workspaceGitStatus"></div><pre id="workspaceDiff" class="agent-workspace-preview">Выберите репозиторий, чтобы начать.</pre></section>
+  </aside>
+
+  <!-- ═══════════ ПАНЕЛЬ «ПАМЯТЬ» ═══════════ -->
+  <div class="memory-modal" id="memoryPanel" aria-hidden="true" onclick="if (event.target === this) closeMemory()">
+    <div class="memory-panel" role="dialog" aria-modal="true" aria-label="Долгосрочная память">
+      <div class="memory-head">
+        <span>🧠 Память</span>
+        <button type="button" class="memory-close" onclick="closeMemory()" aria-label="Закрыть">✕</button>
+      </div>
+      <p class="memory-hint">
+        Агент запоминает устойчивые факты и явные просьбы «запомни». Пароли, токены и ключи
+        не сохраняются. Память видна только вам.
+      </p>
+      <div class="memory-search">
+        <input id="memoryQuery" type="search" placeholder="Поиск по памяти…"
+               autocomplete="off" oninput="filterMemory()">
+      </div>
+      <form class="memory-add" onsubmit="addMemory(event)">
+        <input id="memoryText" placeholder="Что запомнить? Например: предпочитаю краткие ответы" required>
+        <select id="memoryKind" aria-label="Тип записи">
+          <option value="fact">факт</option>
+          <option value="preference">предпочтение</option>
+          <option value="project">проект</option>
+          <option value="decision">решение</option>
+        </select>
+        <input id="memoryTags" placeholder="теги через запятую">
+        <button type="submit">Запомнить</button>
+      </form>
+      <div class="memory-list" id="memoryList"></div>
+      <div class="memory-empty" id="memoryEmpty" hidden>Пока ничего не запомнено.</div>
+    </div>
+  </div>
+
+  <!-- Командная панель (Ctrl+K) -->
+  <div class="cmdk" id="cmdk" aria-hidden="true">
+    <div class="cmdk-panel" role="dialog" aria-modal="true" aria-label="Командная панель">
+      <input class="cmdk-input" id="cmdkInput" type="text" placeholder="Команда или действие…"
+             autocomplete="off" oninput="filterCmdk()" onkeydown="cmdkKey(event)">
+      <div class="cmdk-list" id="cmdkList"></div>
+    </div>
+  </div>
+
+  <!-- Куда складываются уведомления -->
+  <div class="lg-toast-stack" id="toastStack"></div>
+
+  <script src="/static/i18n.js?v=lang2"></script>
+  <script src="/static/tts.js?v=speech2"></script>
+  <script src="/static/app.js?v=chatmem1"></script>
+  <script src="/static/linux.js?v=chatmem1"></script>
+  <script src="/static/memory.js"></script>
+  <script src="/static/workspace.js"></script>
+</body>
+</html>
