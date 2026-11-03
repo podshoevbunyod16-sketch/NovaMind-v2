@@ -101,7 +101,11 @@ def complete_with_mcp(messages: list[dict[str, Any]], *, system: str, provider: 
             continue
         events.append({"type": "step", "icon": "🔌", "text": f"MCP: {server_id}:{tool}"})
         try:
-            result = mcp_registry.call_tool(server_id, tool, arguments)
+            import mcp_manager
+            outcome = mcp_manager.call_tool(server_id, tool, arguments)
+            if not outcome.get("ok"):
+                raise RuntimeError(outcome.get("error") or "Ошибка MCP")
+            result = outcome["result"]
             observation = json.dumps(result, ensure_ascii=False)
             events.append({"type": "tool", "name": "mcp_call", "command": f"{server_id}:{tool}", "code": 0})
         except Exception as exc:

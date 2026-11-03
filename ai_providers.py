@@ -10,36 +10,57 @@ from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 import requests
 from groq_rotation import get_groq_key, mark_groq_key_exhausted, GROQ_KEY_COOLDOWN, mark_groq_key_success
+import provider_manager as pm
 
 logger = logging.getLogger(__name__)
 
 def openai_compatible_request(url, payload, headers, timeout=90, max_retries=2):
-    """Запрос к OpenAI-compatible серверу; HTTP-ошибки разбираются по status_code."""
+    """Запрос к OpenAI-compatible серверу; HTTP-ошибки разбираются по status_code.
+
+    Разные классы ошибок — разная стратегия: 401/403/404/billing не повторяются,
+    429 ждёт Retry-After, 5xx/timeout — backoff с jitter, число попыток конечно.
+    """
     for attempt in range(max(1, int(max_retries))):
         try:
             resp = requests.post(url, json=payload, headers=headers, timeout=timeout)
-            if resp.status_code == 429:
-                if attempt < max_retries - 1:
-                    time.sleep(_retry_after_seconds(resp.headers, 2 ** attempt))
+            if resp.status_code >= 400:
+                kind, retry_after = pm.classify_response(resp.status_code, resp.headers, resp.text)
+                detail = pm.redact((resp.text or '')[:500])
+                if kind == pm.ErrorKind.RATE_LIMIT and attempt < max_retries - 1:
+                    time.sleep(pm.backoff_delay(attempt, retry_after))
                     continue
-                return None, f"OpenAI-compatible сервер ограничил запросы (HTTP 429): {(resp.text or '')[:500]}"
-            if resp.status_code == 401:
-                return None, "OpenAI-compatible сервер отклонил API ключ (401)"
-            resp.raise_for_status()
+                if kind in (pm.ErrorKind.SERVER, pm.ErrorKind.TIMEOUT, pm.ErrorKind.NETWORK) \
+                        and attempt < max_retries - 1:
+                    time.sleep(pm.backoff_delay(attempt, retry_after))
+                    continue
+                labels = {
+                    pm.ErrorKind.AUTH: "API ключ отклонён (401)",
+                    pm.ErrorKind.FORBIDDEN: "доступ запрещён (403)",
+                    pm.ErrorKind.NOT_FOUND: "ресурс или модель не найдены (404)",
+                    pm.ErrorKind.RATE_LIMIT: "ограничение частоты запросов (429)",
+                    pm.ErrorKind.QUOTA: "исчерпана квота",
+                    pm.ErrorKind.BILLING: "проблема с оплатой / тарифом",
+                    pm.ErrorKind.SERVER: f"ошибка сервера (HTTP {resp.status_code})",
+                }
+                label = labels.get(kind, f"HTTP {resp.status_code}")
+                pm.log_event("warning", "provider_http_error", kind=kind.value,
+                             reason=f"{label}: {detail}", attempt=attempt + 1)
+                return None, f"OpenAI-compatible сервер: {label}: {detail}"
             return resp.json(), None
         except requests.exceptions.Timeout:
             if attempt < max_retries - 1:
+                time.sleep(pm.backoff_delay(attempt))
                 continue
             return None, "Таймаут OpenAI-compatible сервера"
         except requests.exceptions.HTTPError as exc:
             status = exc.response.status_code if exc.response is not None else "?"
             if status == 429 and attempt < max_retries - 1:
-                time.sleep(2 ** attempt)
+                time.sleep(pm.backoff_delay(attempt))
                 continue
-            return None, f"OpenAI-compatible сервер вернул HTTP {status}: {str(exc)[:500]}"
+            return None, f"OpenAI-compatible сервер вернул HTTP {status}: {pm.redact(str(exc)[:500])}"
         except requests.exceptions.RequestException as exc:
             if attempt < max_retries - 1:
-                time.sleep(2 ** attempt)
+                time.sleep(pm.backoff_delay(attempt))
                 continue
             return None, f"OpenAI-compatible сервер недоступен: {exc.__class__.__name__}"
         except ValueError:
@@ -76,6 +97,18 @@ def _retry_after_seconds(headers, default=60):
         except (TypeError, ValueError, OverflowError):
             continue
     return max(1, min(int(default), 25 * 3600))
+
+
+def _groq_key_index(key):
+    """Номер ключа по его значению (для логов — без раскрытия самого ключа)."""
+    try:
+        from groq_rotation import GROQ_KEYS
+        for item in GROQ_KEYS:
+            if item.get("key") == key:
+                return item.get("index")
+    except Exception:
+        pass
+    return None
 
 
 def _groq_429_cooldown(response, detail):
@@ -304,19 +337,31 @@ def groq_request_with_rotation(url, payload, headers, timeout=90, max_retries=3)
         if resp.status_code == 401:
             last_error = "Groq HTTP 401: API-ключ отклонён; ключ временно отложен. После 3 последовательных 401 он будет отключён до перезапуска."
             mark_groq_key_exhausted(permanent=False, cooldown_seconds=60, key=current_key, auth_failure=True)
+            pm.log_event("warning", "key_auth_failed", provider="groq", kind="auth",
+                         key_index=_groq_key_index(current_key), reason=last_error,
+                         attempt=attempt + 1)
             continue
 
         if resp.status_code == 429:
-            detail = (resp.text or "")[:400]
+            detail = pm.redact((resp.text or "")[:400], [current_key])
             last_error = f"Groq HTTP 429: превышен лимит запросов/токенов. {detail}".strip()
             cooldown = _groq_429_cooldown(resp, detail)
             mark_groq_key_exhausted(cooldown_seconds=cooldown, key=current_key)
+            resp_headers = getattr(resp, "headers", {}) or {}
+            pm.log_event("warning", "key_rate_limited", provider="groq", kind="rate_limit",
+                         key_index=_groq_key_index(current_key), reason=detail,
+                         cooldown_sec=cooldown, retry_after_sec=pm.parse_retry_after(resp_headers),
+                         attempt=attempt + 1)
             if attempt < max_attempts - 1:
+                time.sleep(pm.backoff_delay(attempt, pm.parse_retry_after(resp_headers)))
                 continue
             return None, last_error
 
         if resp.status_code >= 400:
-            detail = (resp.text or "")[:600]
+            detail = pm.redact((resp.text or "")[:600], [current_key])
+            kind, _ = pm.classify_response(resp.status_code, getattr(resp, "headers", {}) or {}, detail)
+            pm.log_event("warning", "provider_http_error", provider="groq",
+                         kind=kind.value, reason=detail, attempt=attempt + 1)
             return None, f"Groq HTTP {resp.status_code}: {detail}"
 
         try:
@@ -533,6 +578,51 @@ def _free_models(provider: str, selected: str = "") -> list[str]:
     return found
 
 
+_PM = None
+_PM_LOCK = __import__("threading").Lock()
+
+
+def provider_manager():
+    """Ленивый единый Provider Manager со всеми провайдерами из окружения."""
+    global _PM
+    if _PM is None:
+        with _PM_LOCK:
+            if _PM is None:
+                _PM = pm.default_manager()
+    return _PM
+
+
+def _pm_mark_failure(provider, model, error_text):
+    """Отмечает ошибку провайдера в едином менеджере (cooldown его ключа).
+
+    Провайдеры без зарегистрированных ключей (local_demo и т.п.) пропускаются.
+    """
+    try:
+        manager = provider_manager()
+        if provider not in manager.provider_names():
+            return
+        kind = pm.classify_error_text(error_text)
+        key = manager.available_key(provider)
+        if key is None:
+            return  # все ключи уже в cooldown — не используем их повторно
+        manager.mark_key_result(provider, key.index,
+                                pm.ProviderError(kind, pm.redact(str(error_text)[:300]),
+                                                 provider=provider, model=model))
+    except Exception:
+        logger.debug("pm mark failure failed", exc_info=True)
+
+
+def _pm_skip_provider(name):
+    """True, если у провайдера есть ключи, но все они сейчас в cooldown/отключены."""
+    try:
+        manager = provider_manager()
+        if name in manager.provider_names():
+            return manager.all_keys_unavailable(name)
+    except Exception:
+        pass
+    return False
+
+
 def free_failover_targets(provider: str | None = None, model: str | None = None) -> list[tuple[str, str]]:
     """Primary target followed by credentialed free alternatives."""
     import config
@@ -545,6 +635,10 @@ def free_failover_targets(provider: str | None = None, model: str | None = None)
             continue
         if (name != primary_provider and name not in {"local_demo", "openai_compatible"}
                 and not config.has_credentials(name)):
+            continue
+        if name != primary_provider and _pm_skip_provider(name):
+            pm.log_event("info", "provider_skipped", provider=name, model=model,
+                         reason="all keys in cooldown", result="skip")
             continue
         selected = primary_model if name == primary_provider else ""
         models = _free_models(name, selected)
@@ -600,6 +694,7 @@ def _chat_completion_once(messages, provider=None, model=None, system=None,
         )
 
     if error:
+        _pm_mark_failure(provider, model, error)
         return None, error
     try:
         message = (data.get("choices") or [{}])[0].get("message") or {}
@@ -645,12 +740,17 @@ def chat_completion(messages, provider=None, model=None, system=None,
             if failures:
                 logger.warning("AI failover succeeded: %s/%s after %d failure(s)",
                                target_provider, target_model, len(failures))
+                pm.log_event("info", "failover_succeeded", provider=target_provider,
+                             model=target_model, switched_to=target_provider,
+                             result="ok", reason=f"after {len(failures)} failure(s)")
             return text, result_meta
         failure = {"provider": target_provider, "model": target_model,
-                   "error": str(meta or "неизвестная ошибка")[:500]}
+                   "error": pm.redact(str(meta or "неизвестная ошибка")[:500])}
         failures.append(failure)
         logger.warning("AI provider failed (%s/%s), trying next free provider: %s",
                        target_provider, target_model, failure["error"])
+        pm.log_event("warning", "provider_exhausted", provider=target_provider,
+                     model=target_model, reason=failure["error"], result="switch_to_next")
     return None, "Все бесплатные AI-провайдеры недоступны: " + "; ".join(
         f"{item['provider']}: {item['error']}" for item in failures)
 
@@ -868,7 +968,7 @@ def _raw_stream(provider, model, payload, cfg, timeout):
         except requests.exceptions.RequestException as exc:
             last_error = f"Ошибка соединения с {provider}: {exc.__class__.__name__}"
             if attempt < attempts - 1:
-                time.sleep(1)
+                time.sleep(pm.backoff_delay(attempt))
                 continue
             yield "error", last_error
             return
@@ -928,6 +1028,8 @@ def _raw_stream(provider, model, payload, cfg, timeout):
             response.close()
         return
 
+    if last_error:
+        _pm_mark_failure(provider, model, last_error)
     yield "error", last_error or "Не удалось получить поток от провайдера"
 
 

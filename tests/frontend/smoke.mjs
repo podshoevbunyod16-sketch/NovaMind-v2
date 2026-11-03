@@ -1563,7 +1563,13 @@ await settle(60);
 check('«стоп» останавливает работу в Linux',
   !document.getElementById('sendBtn').classList.contains('is-stop')
   && lastAi().querySelector('.answer').textContent.toLowerCase().includes('останов')
-  && !!lastAi().querySelector('.agent-completion'));
+  && !!lastAi().querySelector('.agent-completion'),
+  JSON.stringify({
+    stop: document.getElementById('sendBtn').classList.contains('is-stop'),
+    answer: lastAi().querySelector('.answer')?.textContent?.slice(0, 120),
+    completion: !!lastAi().querySelector('.agent-completion'),
+    runId: window.Linux?.state?.runId,
+  }));
 window.fetch = fetchBeforeStop;
 
 check('за весь прогон ошибок в консоли нет', consoleErrors.length === 0, consoleErrors.join(' | '));

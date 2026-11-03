@@ -69,9 +69,9 @@ def _run(goal, record_id, *, chat_id="", history=None, observations=None,
     integration_context = ""
     try:
         if role == "admin" or str(os.getenv("MCP_ALLOW_USER_READ", "0")) == "1":
-            import mcp_registry
-            connected = mcp_registry.connected_tools()
-            servers = mcp_registry.server_summaries(connected)
+            import mcp_manager
+            connected = mcp_manager.discover_tools()
+            servers = mcp_manager.server_summaries()
             tool_catalog = [{"server_id": item.get("server_id"), "server_name": item.get("server_name"),
                              "name": item.get("name"), "description": item.get("description"),
                              "inputSchema": item.get("inputSchema"), "annotations": item.get("annotations")}

@@ -517,12 +517,13 @@ def run_react(ctx: AgentContext) -> AgentResult:
                         seen.add(key)
                     if name == "mcp_call":
                         # Resolve human-friendly server labels against the unified
-                        # registry; transport-specific quirks stay out of ReAct.
+                        # MCP Manager; transport-specific quirks stay out of ReAct.
                         try:
+                            import mcp_manager
                             import mcp_registry
                             args["server_id"] = mcp_registry.resolve_server_id(
                                 str(args.get("server_id") or ""), str(args.get("tool") or ""),
-                                catalog_list=mcp_registry.connected_tools())
+                                catalog_list=mcp_manager.discover_tools())
                         except Exception:
                             pass
                     if name in {"image", "audio", "video"}:
