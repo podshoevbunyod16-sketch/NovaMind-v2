@@ -518,9 +518,10 @@ def _run_nova(parts, timeout):
         argv = ["nova", verb] + argv[3:]
     elif verb == "mcp" and sub == "tools":
         try:
+            import mcp_manager
             import mcp_registry
             catalog = mcp_registry.format_tools_summary(
-                mcp_registry.connected_tools(), max_tools=40)
+                mcp_manager.discover_tools(), max_tools=40)
         except Exception as error:  # noqa: BLE001 — каталог необязателен
             catalog = f"каталог недоступен: {type(error).__name__}"
         return _result(0, "MCP-инструменты:\n" + str(catalog))
@@ -611,8 +612,8 @@ def _run_python_gateway(parts):
                        for item in tool_registry.tool_schemas()}
             return _result(0, json.dumps(payload, ensure_ascii=False, indent=2))
         if target == "__mcp_tools__":
-            import mcp_registry
-            payload = mcp_registry.connected_tools()
+            import mcp_manager
+            payload = mcp_manager.discover_tools()
             return _result(0, json.dumps(payload, ensure_ascii=False, indent=2))
 
         registry_name = tool_registry.ACTION_TO_TOOL.get(target, target)

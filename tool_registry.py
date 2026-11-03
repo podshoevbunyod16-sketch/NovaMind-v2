@@ -77,8 +77,8 @@ def tool_schemas(workspace: bool | None = None) -> list[dict]:
                 "permissions": list(t.permissions), "timeout": t.timeout,
                 "risk": t.risk} for t in specs]
     try:
-        import mcp_registry
-        connected = mcp_registry.connected_tools()
+        import mcp_manager
+        connected = mcp_manager.discover_tools()
         if connected:
             available = ", ".join(f"{x['server_id']}:{x['name']}" for x in connected)
             # Если mcp_call уже зарегистрирован, не дублируем его, а дополняем
@@ -520,8 +520,13 @@ def _register_agent_tools():
                     return {"ok": False, "error": {"type": "permission_denied",
                         "message": "Пользователям разрешены только MCP-инструменты с readOnlyHint=true",
                         "retryable": False}}
-            result = mcp_registry.call_tool(server_id, tool, arguments or {})
-            return {"ok": True, "result": result}
+            import mcp_manager
+            outcome = mcp_manager.call_tool(server_id, tool, arguments or {})
+            if not outcome.get("ok"):
+                return {"ok": False, "error": {"type": "mcp_error",
+                                               "message": outcome.get("error", "Ошибка MCP"),
+                                               "retryable": True}}
+            return {"ok": True, "result": outcome["result"]}
         register_tool(ToolSpec(
             "mcp_call", "Вызвать внешний MCP-инструмент. Сначала используйте mcp_list, чтобы узнать точную схему аргументов; после вызова проверьте наблюдение и не заявляйте успех при ошибке.",
             {"type": "object",

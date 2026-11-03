@@ -763,7 +763,8 @@ class NovaToolsContext:
             return []
         try:
             import mcp_registry
-            return mcp_registry.connected_tools()
+            import mcp_manager
+            return mcp_manager.discover_tools()
         except Exception:  # noqa: BLE001 — MCP необязателен
             log.debug("MCP недоступен", exc_info=True)
             return []
@@ -799,7 +800,11 @@ class NovaToolsContext:
     # ── действия ─────────────────────────────────────────────────────────
     def call_mcp(self, server_id: str, tool: str, arguments: dict):
         import mcp_registry
-        return mcp_registry.call_tool(server_id, tool, arguments)
+        import mcp_manager
+        outcome = mcp_manager.call_tool(server_id, tool, arguments)
+        if not outcome.get("ok"):
+            raise RuntimeError(outcome.get("error") or "Ошибка MCP")
+        return outcome["result"]
 
     def generate_media(self, kind: str, prompt: str, params: dict):
         """Генерация медиа: (result, model, errors), как у media_agent."""
@@ -909,7 +914,8 @@ def agent_status():
     if mcp_access:
         try:
             import mcp_registry
-            mcp_tool_count = len(mcp_registry.connected_tools())
+            import mcp_manager
+            mcp_tool_count = len(mcp_manager.discover_tools())
         except Exception:  # noqa: BLE001
             mcp_tool_count = 0
     workspace = tools_enabled()

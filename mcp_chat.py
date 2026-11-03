@@ -63,9 +63,13 @@ def complete_with_mcp(messages: list[dict[str, Any]], *, system: str, provider: 
     if not _mcp_allowed_for_user():
         return None, None, []
     try:
-        tools = mcp_registry.connected_tools()
+        import mcp_manager
+        tools = mcp_manager.discover_tools()
     except Exception:
-        tools = []
+        try:
+            tools = mcp_registry.connected_tools()
+        except Exception:
+            tools = []
     if not tools:
         return None, None, []
 
