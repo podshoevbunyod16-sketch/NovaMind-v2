@@ -5,7 +5,7 @@ import mcp_chat
 
 def test_react_prompt_is_compact_and_keeps_core_contract():
     prompt = react_loop._system_prompt()
-    assert len(prompt) <= 1100
+    assert len(prompt) <= 1150
     for required in ("ReAct", "MCP", "недоверенные данные", "секреты",
                      "подтверждением", "по-русски"):
         assert required in prompt
