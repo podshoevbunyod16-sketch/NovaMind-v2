@@ -1426,7 +1426,7 @@ function createAssistantTurn(options = {}) {
       actionsEl.querySelector('[data-act="regen"]').addEventListener('click', () => {
         if (lastUserMessage) sendMessage(lastUserMessage);
       });
-      if (meta.runId) api.completion(meta.runId);
+      // Блок «Результат работы / Готово / Продолжай работать» отключён по просьбе владельца.
 
       // Автоозвучка: ровно один раз на завершённый ответ, никогда — для
       // истории, ошибки или остановленной генерации (проверяется в контроллере).
