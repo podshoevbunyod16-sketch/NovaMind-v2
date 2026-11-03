@@ -219,12 +219,54 @@ def native_tool_risk(name: str) -> str:
     return AGENT_ACTION_META.get(action, ("", "safe"))[1]
 
 
+def _schema_error(value: Any, schema: dict, path: str = "arguments") -> str | None:
+    """Validate the JSON-Schema subset shared by model and direct tool calls."""
+    if not isinstance(schema, dict):
+        return None
+    expected = schema.get("type")
+    types = {"object": dict, "array": list, "string": str, "integer": int,
+             "number": (int, float), "boolean": bool}
+    if expected in types:
+        valid = isinstance(value, types[expected])
+        if expected in {"integer", "number"} and isinstance(value, bool):
+            valid = False
+        if not valid:
+            return f"{path}: expected {expected}"
+    if "enum" in schema and value not in schema["enum"]:
+        return f"{path}: value is not in enum"
+    if isinstance(value, dict):
+        for required in schema.get("required", []):
+            if required not in value:
+                return f"{path}.{required}: required field is missing"
+        properties = schema.get("properties", {})
+        if schema.get("additionalProperties") is False:
+            extra = set(value) - set(properties)
+            if extra:
+                return f"{path}: unexpected fields {', '.join(sorted(extra))}"
+        for key, item in value.items():
+            if key in properties:
+                error = _schema_error(item, properties[key], f"{path}.{key}")
+                if error:
+                    return error
+    if isinstance(value, list) and isinstance(schema.get("items"), dict):
+        for index, item in enumerate(value):
+            error = _schema_error(item, schema["items"], f"{path}[{index}]")
+            if error:
+                return error
+    return None
+
+
 def call_tool(name: str, **kwargs) -> dict:
     """Единая точка исполнения инструмента реестра с guardrails и capability."""
     status_callback = kwargs.pop("_status_callback", None)
     spec = get_tool(name)
     if not spec:
         return {"ok": False, "error": {"type": "unknown_tool", "message": f"Unknown tool: {name}", "retryable": False}}
+    schema_error = _schema_error(kwargs, spec.schema or {})
+    if schema_error:
+        return {"ok": False, "tool": name,
+                "error": {"type": "bad_arguments", "retryable": False,
+                          "message": schema_error}}
     try:
         import guardrails
         verdict = guardrails.guard_tool_call(name, kwargs)
@@ -233,19 +275,21 @@ def call_tool(name: str, **kwargs) -> dict:
                     "error": {"type": "guardrail", "retryable": False,
                               "message": "Вызов отклонён ограждением: "
                                          + (", ".join(verdict.reasons) or "некорректные аргументы")}}
-    except ImportError:
-        pass
-    except Exception:                         # noqa: BLE001
-        log.warning("guardrail check failed", exc_info=True)
+    except Exception as exc:                  # noqa: BLE001 — enforcement must fail closed
+        log.error("guardrail check unavailable; tool call blocked", exc_info=True)
+        return {"ok": False, "tool": name,
+                "error": {"type": "guardrail_unavailable", "retryable": True,
+                          "message": "Проверка безопасности инструмента недоступна; вызов заблокирован."}}
     try:
         import capabilities
         denied = capabilities.require(name, kwargs)
         if denied:
             return denied
-    except ImportError:
-        pass
-    except Exception:                         # noqa: BLE001
-        log.warning("capability check failed", exc_info=True)
+    except Exception as exc:                  # noqa: BLE001 — enforcement must fail closed
+        log.error("capability check unavailable; tool call blocked", exc_info=True)
+        return {"ok": False, "tool": name,
+                "error": {"type": "capability_unavailable", "retryable": True,
+                          "message": "Проверка прав инструмента недоступна; вызов заблокирован."}}
     if status_callback and name in {"image", "audio", "video"}:
         kwargs["on_status"] = status_callback
     return spec.call(**kwargs)
@@ -521,6 +565,13 @@ def _register_agent_tools():
                         "message": "Пользователям разрешены только MCP-инструменты с readOnlyHint=true",
                         "retryable": False}}
             result = mcp_registry.call_tool(server_id, tool, arguments or {})
+            if isinstance(result, dict) and result.get("isError"):
+                details = result.get("content") if isinstance(result.get("content"), list) else []
+                message = "; ".join(str(item.get("text") or "") for item in details
+                                     if isinstance(item, dict) and item.get("text"))
+                return {"ok": False, "error": {"type": "mcp_tool_error",
+                                                  "message": message[:1000] or "MCP-инструмент вернул isError=true",
+                                                  "retryable": True}}
             return {"ok": True, "result": result}
         register_tool(ToolSpec(
             "mcp_call", "Вызвать внешний MCP-инструмент. Сначала используйте mcp_list, чтобы узнать точную схему аргументов; после вызова проверьте наблюдение и не заявляйте успех при ошибке.",

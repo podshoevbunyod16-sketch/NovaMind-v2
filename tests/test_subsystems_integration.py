@@ -267,3 +267,119 @@ def test_prompt_list_stays_public(client):
     assert payload["ok"] is True
     for item in payload["prompts"]:
         assert "text" not in item
+
+
+def test_enabled_skill_context_reaches_the_react_model(admin_client, monkeypatch):
+    import skills_registry
+    from tests.agent_helpers import model_text
+
+    marker = "SKILL_CONTEXT_INTEGRATION_MARKER"
+    monkeypatch.setattr(skills_registry, "prompt_context", lambda: marker)
+    seen = []
+    script(monkeypatch, ["Ответ с использованием включённого навыка."], seen)
+    events = ndjson(admin_client.post("/api/agent/stream", json={
+        "message": "Выполни задачу подходящим навыком"}))
+
+    assert "Ответ с использованием" in answer_of(events)
+    assert marker in model_text(seen)
+
+
+def test_ordinary_mcp_chat_uses_registry_and_exposes_only_readonly_tools(monkeypatch):
+    import mcp_chat
+    import mcp_registry
+    import tool_registry
+
+    monkeypatch.setattr(mcp_chat, "_mcp_allowed_for_user", lambda: True)
+    discovered = [
+        {"server_id": "docs", "name": "read_page", "description": "Read a page",
+         "annotations": {"readOnlyHint": True}, "inputSchema": {"type": "object"}},
+        {"server_id": "docs", "name": "delete_page", "description": "Delete a page",
+         "annotations": {"readOnlyHint": False}, "inputSchema": {"type": "object"}},
+    ]
+    monkeypatch.setattr(mcp_registry, "connected_tools", lambda: discovered)
+    summaries = []
+    original_tool_prompt = mcp_chat._tool_prompt
+    def capture_tool_prompt(tools):
+        summaries.extend(item["name"] for item in tools)
+        return original_tool_prompt(tools)
+    monkeypatch.setattr(mcp_chat, "_tool_prompt", capture_tool_prompt)
+    monkeypatch.setattr(mcp_registry, "resolve_server_id", lambda *_args, **_kwargs: "docs")
+    monkeypatch.setattr(tool_registry, "bootstrap_default_tools", lambda: None)
+    calls = []
+    monkeypatch.setattr(tool_registry, "call_tool", lambda name, **kwargs:
+                        calls.append((name, kwargs)) or {"ok": True, "result": {"content": []}})
+    model_calls = iter([
+        ('{"action":"mcp_call","server_id":"docs","tool":"read_page","arguments":{}}', {}),
+        ("Страница прочитана.", {"model": "test"}),
+    ])
+    monkeypatch.setattr(mcp_chat, "chat_completion", lambda *_args, **_kwargs: next(model_calls))
+
+    reply, _meta, events = mcp_chat.complete_with_mcp(
+        [{"role": "user", "content": "Прочитай страницу"}],
+        system="", provider="groq", model="openai/gpt-oss-120b")
+
+    assert reply == "Страница прочитана."
+    assert summaries == ["read_page"]
+    assert len(calls) == 1 and calls[0][0] == "mcp_call"
+    assert calls[0][1]["tool"] == "read_page"
+    assert any(event.get("type") == "tool" for event in events)
+
+
+def test_tool_registry_blocks_execution_if_guardrail_check_crashes(monkeypatch):
+    import tool_registry
+    executed = []
+    spec = tool_registry.ToolSpec(
+        "guardrail_failure_probe", "Probe", {"type": "object", "properties": {}},
+        lambda **_kwargs: executed.append(True) or {"ok": True})
+    tool_registry.register_tool(spec)
+    monkeypatch.setattr(guardrails, "guard_tool_call",
+                        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("guard offline")))
+
+    result = tool_registry.call_tool("guardrail_failure_probe")
+
+    assert result["ok"] is False
+    assert result["error"]["type"] == "guardrail_unavailable"
+    assert executed == []
+
+
+def test_tool_registry_validates_arguments_before_execution():
+    import tool_registry
+    executed = []
+    tool_registry.register_tool(tool_registry.ToolSpec(
+        "schema_validation_probe", "Probe",
+        {"type": "object", "properties": {"query": {"type": "string"}},
+         "required": ["query"], "additionalProperties": False},
+        lambda **kwargs: executed.append(kwargs) or {"ok": True}))
+
+    result = tool_registry.call_tool("schema_validation_probe", unexpected=True)
+
+    assert result["ok"] is False
+    assert result["error"]["type"] == "bad_arguments"
+    assert executed == []
+
+
+def test_streaming_chat_never_switches_to_local_model_after_selected_target_fails(admin_client, monkeypatch):
+    import routes.chat as chat_routes
+    import local_llm
+
+    selected = []
+    def failed_stream(*_args, **_kwargs):
+        yield "error", "selected provider unavailable"
+        yield "done", ""
+    def failed_retry(_messages, **kwargs):
+        selected.append((kwargs.get("provider"), kwargs.get("model")))
+        return None, "selected target failed"
+    monkeypatch.setattr(chat_routes, "chat_stream", failed_stream)
+    monkeypatch.setattr(chat_routes, "chat_completion", failed_retry)
+    monkeypatch.setattr(local_llm, "complete",
+                        lambda *_args, **_kwargs: pytest.fail("silent local fallback must not run"))
+
+    response = admin_client.post("/send_stream", json={"message": "Привет"})
+    events = ndjson(response)
+
+    assert selected and selected[0][0] is not None and selected[0][1] is not None
+    assert not any("token" in event for event in events)
+    done = [event for event in events if event.get("done") is True]
+    assert done and done[-1]["has_reply"] is False
+    assert (done[-1]["provider"], done[-1]["model"]) == selected[0]
+

@@ -93,6 +93,12 @@ def _run(goal, record_id, *, chat_id="", history=None, observations=None,
         memory_context = memory_store.prompt_block(memory_key, goal)
     except Exception:
         current_app.logger.warning("Не удалось загрузить память для ReAct", exc_info=True)
+    skill_context = ""
+    try:
+        import skills_registry
+        skill_context = skills_registry.prompt_context()
+    except Exception:
+        current_app.logger.warning("Не удалось загрузить включённые навыки", exc_info=True)
     current_run_id = str(run_id or record_id)
     try:
         import prompt_registry
@@ -223,7 +229,7 @@ def _run(goal, record_id, *, chat_id="", history=None, observations=None,
         workspace=bool(workspace), run_id=current_run_id, resume=resume,
         cancel=cancel, approvals=list(approvals or []), tools=specs,
         memory_context=memory_context, integration_context=integration_context,
-        search_requested=bool(search_requested),
+        skill_context=skill_context, search_requested=bool(search_requested),
         max_steps=int(os.getenv("AGENT_MAX_STEPS", "20")),
         timeout=float(os.getenv("AGENT_TIMEOUT", "240")),
         max_tokens=max_tokens,

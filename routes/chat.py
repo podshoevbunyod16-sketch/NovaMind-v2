@@ -327,6 +327,7 @@ def send_stream():
     def generate():
         full_reply = ""
         reasoning_text = ""
+        stream_error = ""
         try:
             if tools_allowed:
                 mcp_reply, mcp_meta, mcp_events = complete_with_mcp(
@@ -370,28 +371,32 @@ def send_stream():
                     full_reply += chunk
                     yield emit({"token": chunk})
                 elif kind == "error":
-                    yield emit({"error": chunk})
+                    stream_error = str(chunk or "")
+                    yield emit({"error": stream_error})
                 elif kind == "done":
                     break
 
             if not full_reply:
-                # Модель промолчала в потоке: второй шанс без стрима, затем —
-                # встроенная офлайн-модель. Пустого пузыря не бывает.
-                retry, _retry_meta = chat_completion(
+                # A non-stream retry may recover the same selected target, but
+                # must never silently substitute the local model or another provider.
+                retry, retry_meta = chat_completion(
                     history_for_prompt + [{"role": "user", "content": message}],
+                    provider=provider,
+                    model=model,
                     system=config.system_prompt,
                     temperature=0.7,
                     timeout=180,
                 )
                 if retry:
                     full_reply = retry
+                    yield emit({"token": full_reply})
                 else:
-                    import local_llm
-                    payload_messages = ([{"role": "system", "content": config.system_prompt}]
-                                        if config.system_prompt else []) + history_for_prompt + [
-                                            {"role": "user", "content": message}]
-                    full_reply = local_llm.complete(payload_messages)
-                yield emit({"token": full_reply})
+                    if not stream_error:
+                        yield emit({"error": str(retry_meta or "Выбранная модель не вернула ответ.")})
+                    yield emit({"done": True, "model": model, "provider": provider,
+                                "offline": provider == "local_demo", "has_reply": False,
+                                "reasoning_chars": len(reasoning_text), "chat_id": _chat_id_stream})
+                    return
 
             if full_reply:
                 add_message(_chat_id_stream, "assistant", full_reply)

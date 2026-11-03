@@ -139,3 +139,49 @@ def test_resume_does_not_repeat_a_completed_tool_call():
     assert result.steps == 2
     assert result.observations[0]["result"]["result"] == "old evidence"
     assert result.observations[1]["result"]["error"]["type"] == "repeat_call"
+
+
+
+def test_react_uses_the_selected_provider_and_model_for_every_cycle():
+    transcript = iter([
+        ('```json\n{"tool":"lookup","arguments":{"query":"x"}}\n```', {}),
+        ("Найдено X. Задача проверена по результату инструмента.", {"model": "gemini-3.8-flash"}),
+    ])
+    targets = []
+    spec = ToolSpec("lookup", "Lookup", {
+        "type": "object", "properties": {"query": {"type": "string"}},
+        "required": ["query"], "additionalProperties": False,
+    }, lambda **_kwargs: {"ok": True})
+
+    def complete(_messages, **kwargs):
+        targets.append((kwargs.get("provider"), kwargs.get("model")))
+        return next(transcript)
+
+    result = run_react(AgentContext(
+        "Найди X", complete=complete, tools=[spec], provider="google_ai_studio",
+        model="gemini-3.8-flash", call_tool=lambda _name, **_kwargs: {"ok": True, "result": "X"}))
+
+    assert result.status == "completed"
+    assert targets == [("google_ai_studio", "gemini-3.8-flash")] * 2
+
+
+def test_tool_handler_typeerror_is_not_retried_as_a_second_call():
+    calls = []
+    transcript = iter([
+        ('```json\n{"tool":"write_once","arguments":{}}\n```', {}),
+        ("Операция не выполнена: обработчик вернул ошибку.", {}),
+    ])
+    spec = ToolSpec("write_once", "Write once", {
+        "type": "object", "properties": {},
+    }, lambda **_kwargs: {"ok": True})
+
+    def broken_handler(name, **_kwargs):
+        calls.append(name)
+        raise TypeError("handler failed after invocation")
+
+    result = run_react(AgentContext(
+        "Выполни операцию", complete=lambda *_a, **_kw: next(transcript),
+        tools=[spec], call_tool=broken_handler, max_steps=3))
+
+    assert calls == ["write_once"]
+    assert result.observations[0]["result"]["ok"] is False

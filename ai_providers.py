@@ -263,100 +263,118 @@ def _gemini_generation_config(model, payload):
     return generation_config
 
 
-def gemini_request(model,payload,timeout=90,max_retries=2):
-    key=(os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_AI_STUDIO_KEY") or "").strip()
-    if not key: return None,"Google AI Studio: GEMINI_API_KEY не найден в .env"
-    model_id=str(model or "").strip().removeprefix("models/")
-    system_text,contents_out=gemini_messages_from_openai(payload.get("messages",[]))
-    if not contents_out: return None,"Google AI Studio: отсутствует сообщение"
-    body={"contents": contents_out, "generationConfig": _gemini_generation_config(model_id, payload)}
-    if system_text: body["systemInstruction"]={"parts":[{"text":system_text}]}
-    gemini_tools=gemini_tools_payload(payload.get("tools"))
-    if gemini_tools:
-        body["tools"]=gemini_tools
-        body["toolConfig"]={"functionCallingConfig":{"mode":"AUTO"}}
-    url=f"https://generativelanguage.googleapis.com/v1beta/models/{model_id}:generateContent"
-    headers={"Content-Type":"application/json","x-goog-api-key":key}
-    for attempt in range(max_retries):
-        try:
-            r=requests.post(url,json=body,headers=headers,timeout=timeout)
-            if r.status_code == 429 and attempt < max_retries - 1:
-                time.sleep(min(_retry_after_seconds(r.headers, 2 ** attempt), 30))
-                continue
-            if r.status_code >= 400:
-                return None, _format_gemini_error(r.status_code, r)
-            data = r.json()
-            if not isinstance(data, dict):
-                return None, "Google AI Studio вернул ответ неожиданной структуры"
-            parts=[]; tool_calls=[]
-            for candidate in data.get("candidates",[]):
-                for part in (candidate.get("content") or {}).get("parts",[]):
-                    if part.get("text"): parts.append(part["text"])
-                    call = part.get("functionCall") if isinstance(part, dict) else None
-                    if isinstance(call, dict) and call.get("name"):
-                        tool_calls.append({"id": str(call.get("id") or f"call_{len(tool_calls)}"), "type": "function",
-                                           "function": {"name": call["name"],
-                                                        "arguments": json.dumps(call.get("args") or {}, ensure_ascii=False)}})
-            if not parts and not tool_calls: return None,"Google AI Studio не вернул текст"
-            message={"role":"assistant","content":"".join(parts)}
-            if tool_calls: message["tool_calls"]=tool_calls
-            return {"choices":[{"message":message}]},None
-        except requests.exceptions.Timeout:
-            if attempt<max_retries-1: continue
-            return None,"Google AI Studio: таймаут"
-        except requests.exceptions.HTTPError as exc:
-            status = exc.response.status_code if exc.response is not None else "?"
-            return None, f"Google AI Studio HTTP {status}: {exc.__class__.__name__}"
-        except requests.exceptions.RequestException as exc:
-            if attempt < max_retries - 1:
-                time.sleep(2 ** attempt)
-                continue
-            return None, f"Google AI Studio: {exc.__class__.__name__}"
-        except (ValueError,TypeError): return None,"Google AI Studio вернул некорректный JSON"
-    return None,"Google AI Studio: запрос не выполнен"
-
-def gemini_stream_request(model,payload,timeout=90):
-    """Открывает нативный Gemini SSE-поток и возвращает подробную ошибку API."""
-    key=(os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_AI_STUDIO_KEY") or "").strip()
-    if not key:
-        return None,"Google AI Studio: GEMINI_API_KEY не найден в .env"
-
-    model_id=str(model or "").strip().removeprefix("models/")
-    system_text,contents_out=gemini_messages_from_openai(payload.get("messages",[]))
+def _gemini_request_with_key(model, payload, key, timeout=90):
+    model_id = str(model or "").strip().removeprefix("models/")
+    system_text, contents_out = gemini_messages_from_openai(payload.get("messages", []))
     if not contents_out:
-        return None,"Google AI Studio: отсутствует сообщение"
-
-    body={
-        "contents": contents_out,
-        "generationConfig": _gemini_generation_config(model_id, payload)
-    }
+        raise pm.ProviderError(pm.ErrorKind.BAD_RESPONSE,
+                               "Google AI Studio: отсутствует сообщение",
+                               provider="google_ai_studio", model=model)
+    body = {"contents": contents_out,
+            "generationConfig": _gemini_generation_config(model_id, payload)}
     if system_text:
-        body["systemInstruction"]={"parts":[{"text":system_text}]}
+        body["systemInstruction"] = {"parts": [{"text": system_text}]}
+    gemini_tools = gemini_tools_payload(payload.get("tools"))
+    if gemini_tools:
+        body["tools"] = gemini_tools
+        body["toolConfig"] = {"functionCallingConfig": {"mode": "AUTO"}}
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_id}:generateContent"
+    headers = {"Content-Type": "application/json", "x-goog-api-key": key}
+    response = requests.post(url, json=body, headers=headers, timeout=timeout)
+    if response.status_code >= 400:
+        kind, retry_after = pm.classify_response(
+            response.status_code, response.headers, response.text or "")
+        raise pm.ProviderError(kind, _format_gemini_error(response.status_code, response),
+                               status_code=response.status_code, retry_after=retry_after,
+                               provider="google_ai_studio", model=model)
+    data = response.json()
+    if not isinstance(data, dict):
+        raise pm.ProviderError(pm.ErrorKind.BAD_RESPONSE,
+                               "Google AI Studio вернул ответ неожиданной структуры",
+                               provider="google_ai_studio", model=model)
+    parts, tool_calls = [], []
+    for candidate in data.get("candidates", []):
+        for part in (candidate.get("content") or {}).get("parts", []):
+            if part.get("text"):
+                parts.append(part["text"])
+            call = part.get("functionCall") if isinstance(part, dict) else None
+            if isinstance(call, dict) and call.get("name"):
+                tool_calls.append({"id": str(call.get("id") or f"call_{len(tool_calls)}"),
+                                   "type": "function",
+                                   "function": {"name": call["name"],
+                                                "arguments": json.dumps(call.get("args") or {}, ensure_ascii=False)}})
+    if not parts and not tool_calls:
+        raise pm.ProviderError(pm.ErrorKind.BAD_RESPONSE,
+                               "Google AI Studio не вернул текст",
+                               provider="google_ai_studio", model=model)
+    message = {"role": "assistant", "content": "".join(parts)}
+    if tool_calls:
+        message["tool_calls"] = tool_calls
+    return {"choices": [{"message": message}]}
 
-    url=f"https://generativelanguage.googleapis.com/v1beta/models/{model_id}:streamGenerateContent"
-    headers={
-        "Content-Type":"application/json",
-        "Accept":"text/event-stream",
-        "x-goog-api-key":key
-    }
 
+def gemini_request(model, payload, timeout=90, max_retries=2):
+    manager = provider_manager()
+    if "google_ai_studio" in manager.provider_names():
+        data, error = manager.execute(
+            "google_ai_studio", model,
+            lambda key_state: _gemini_request_with_key(model, payload, key_state.key, timeout),
+            max_attempts=max_retries)
+        return data, str(error) if error else None
+    key = (os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_AI_STUDIO_KEY") or "").strip()
+    if not key:
+        return None, "Google AI Studio: GEMINI_API_KEY не найден в .env"
     try:
-        r=requests.post(
-            url,
-            params={"alt":"sse"},
-            json=body,
-            headers=headers,
-            timeout=(15, timeout),
-            stream=True
-        )
-        if r.status_code >= 400:
-            return None, _format_gemini_error(r.status_code, r)
-        r.encoding="utf-8"
-        return r,None
-    except requests.exceptions.Timeout:
-        return None,"Google AI Studio: таймаут при подключении к streamGenerateContent"
-    except requests.exceptions.RequestException as exc:
-        return None,f"Google AI Studio: {exc}"
+        return _gemini_request_with_key(model, payload, key, timeout), None
+    except Exception as exc:
+        return None, str(exc)
+
+
+def _gemini_stream_with_key(model, payload, key, timeout=90):
+    model_id = str(model or "").strip().removeprefix("models/")
+    system_text, contents_out = gemini_messages_from_openai(payload.get("messages", []))
+    if not contents_out:
+        raise pm.ProviderError(pm.ErrorKind.BAD_RESPONSE,
+                               "Google AI Studio: отсутствует сообщение",
+                               provider="google_ai_studio", model=model)
+    body = {"contents": contents_out,
+            "generationConfig": _gemini_generation_config(model_id, payload)}
+    if system_text:
+        body["systemInstruction"] = {"parts": [{"text": system_text}]}
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_id}:streamGenerateContent"
+    headers = {"Content-Type": "application/json", "Accept": "text/event-stream",
+               "x-goog-api-key": key}
+    response = requests.post(url, params={"alt": "sse"}, json=body, headers=headers,
+                             timeout=(15, timeout), stream=True)
+    if response.status_code >= 400:
+        kind, retry_after = pm.classify_response(
+            response.status_code, response.headers, response.text or "")
+        status = response.status_code
+        message = _format_gemini_error(status, response)
+        response.close()
+        raise pm.ProviderError(kind, message, status_code=status, retry_after=retry_after,
+                               provider="google_ai_studio", model=model)
+    response.encoding = "utf-8"
+    return response
+
+
+def gemini_stream_request(model, payload, timeout=90):
+    manager = provider_manager()
+    if "google_ai_studio" in manager.provider_names():
+        def open_with_key(key_state):
+            response = _gemini_stream_with_key(model, payload, key_state.key, timeout)
+            response._novamind_key_index = key_state.index
+            return response
+        response, error = manager.execute("google_ai_studio", model, open_with_key)
+        return response, str(error) if error else None
+    key = (os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_AI_STUDIO_KEY") or "").strip()
+    if not key:
+        return None, "Google AI Studio: GEMINI_API_KEY не найден в .env"
+    try:
+        return _gemini_stream_with_key(model, payload, key, timeout), None
+    except Exception as exc:
+        return None, str(exc)
+
 
 def groq_request_with_rotation(url, payload, headers, timeout=90, max_retries=3):
     """
@@ -678,6 +696,78 @@ def free_failover_targets(provider: str | None = None, model: str | None = None)
     return [(primary_provider, primary_model)]
 
 
+def _managed_provider_request(provider, model, url, payload, headers, timeout=90):
+    """Rotate keys only inside the selected provider; never change provider/model."""
+    manager = provider_manager()
+    if provider not in manager.provider_names():
+        return openai_compatible_request(url, payload, headers, timeout=timeout)
+
+    def request_with_key(key_state):
+        request_headers = dict(headers or {})
+        request_headers["Authorization"] = f"Bearer {key_state.key}"
+        data, error = openai_compatible_request(
+            url, payload, request_headers, timeout=timeout, max_retries=1)
+        if error:
+            kind = pm.classify_error_text(error)
+            raise pm.ProviderError(kind, str(error), provider=provider, model=model)
+        return data
+
+    data, error = manager.execute(provider, model, request_with_key)
+    return data, str(error) if error else None
+
+
+def _managed_stream_request(provider, model, url, payload, headers, timeout=90):
+    """Open an SSE response with same-provider key rotation before streaming starts."""
+    manager = provider_manager()
+    if provider not in manager.provider_names():
+        try:
+            response = requests.post(url, json=payload, headers=headers,
+                                     timeout=(min(30, timeout), timeout), stream=True)
+        except requests.exceptions.RequestException as exc:
+            return None, f"Ошибка соединения с {provider}: {exc.__class__.__name__}"
+        if response.status_code >= 400:
+            detail = pm.redact((response.text or "")[:600])
+            response.close()
+            return None, f"{provider} HTTP {response.status_code}: {detail}"
+        response.encoding = "utf-8"
+        return response, None
+
+    def open_with_key(key_state):
+        request_headers = dict(headers or {})
+        request_headers["Authorization"] = f"Bearer {key_state.key}"
+        response = requests.post(url, json=payload, headers=request_headers,
+                                 timeout=(min(30, timeout), timeout), stream=True)
+        if response.status_code >= 400:
+            detail = pm.redact((response.text or "")[:600], [key_state.key])
+            kind, retry_after = pm.classify_response(
+                response.status_code, response.headers, response.text or "")
+            status = response.status_code
+            response.close()
+            raise pm.ProviderError(kind, f"{provider} HTTP {status}: {detail}",
+                                   status_code=status, retry_after=retry_after,
+                                   provider=provider, model=model)
+        response.encoding = "utf-8"
+        response._novamind_key_index = key_state.index
+        return response
+
+    response, error = manager.execute(provider, model, open_with_key)
+    return response, str(error) if error else None
+
+
+def _mark_stream_key_failure(provider, model, response, error_text):
+    key_index = getattr(response, "_novamind_key_index", None)
+    if key_index is None:
+        return
+    try:
+        kind = pm.classify_error_text(error_text)
+        provider_manager().mark_key_result(
+            provider, key_index,
+            pm.ProviderError(kind, pm.redact(str(error_text)[:300]),
+                             provider=provider, model=model, key_index=key_index))
+    except Exception:
+        logger.debug("stream key failure update failed", exc_info=True)
+
+
 def _chat_completion_once(messages, provider=None, model=None, system=None,
                           temperature=0.7, max_tokens=None, timeout=90, extra=None,
                           tools=None, tool_choice=None):
@@ -717,12 +807,10 @@ def _chat_completion_once(messages, provider=None, model=None, system=None,
     elif provider == "groq":
         data, error = groq_request_with_rotation(cfg["url"], payload, provider_headers("groq"), timeout=timeout)
     else:
-        data, error = openai_compatible_request(
-            cfg["url"], payload, provider_headers(provider), timeout=timeout
-        )
+        data, error = _managed_provider_request(
+            provider, model, cfg["url"], payload, provider_headers(provider), timeout=timeout)
 
     if error:
-        _pm_mark_failure(provider, model, error)
         return None, error
     try:
         message = (data.get("choices") or [{}])[0].get("message") or {}
@@ -934,8 +1022,48 @@ def _raw_stream(provider, model, payload, cfg, timeout):
                             continue
                         if part.get("text"):
                             yield "token", part["text"]
+        except requests.exceptions.RequestException as exc:
+            _mark_stream_key_failure("google_ai_studio", model, upstream, exc)
+            yield "error", f"Соединение с Google AI Studio прервано: {exc.__class__.__name__}"
+            return
         finally:
             upstream.close()
+        return
+
+    if provider != "groq":
+        response, error = _managed_stream_request(
+            provider, model, cfg["url"], payload, provider_headers(provider), timeout)
+        if response is None:
+            yield "error", error or f"Не удалось открыть поток от {provider}"
+            return
+        response.encoding = "utf-8"
+        try:
+            for raw in response.iter_lines(decode_unicode=True):
+                if not raw:
+                    continue
+                line = raw.strip()
+                if line.startswith("data:"):
+                    line = line[5:].strip()
+                if line == "[DONE]":
+                    break
+                try:
+                    chunk = json.loads(line)
+                except (TypeError, ValueError):
+                    continue
+                choice = (chunk.get("choices") or [{}])[0]
+                delta = choice.get("delta") or {}
+                thought = delta.get("reasoning") or delta.get("reasoning_content") or ""
+                if thought:
+                    yield "reasoning", thought
+                token = delta.get("content") or choice.get("text") or ""
+                if token:
+                    yield "token", token
+        except requests.exceptions.RequestException as exc:
+            _mark_stream_key_failure(provider, model, response, exc)
+            yield "error", f"Соединение с моделью прервано: {exc.__class__.__name__}"
+            return
+        finally:
+            response.close()
         return
 
     headers = provider_headers(provider)

@@ -43,7 +43,13 @@ def _extract_action(text: str) -> dict[str, Any] | None:
 
 
 def _tool_prompt(tools: list[dict[str, Any]]) -> str:
-    summary = mcp_registry.format_tools_summary(tools)
+    # Keep formatting local to this module: mcp_registry owns discovery and
+    # transport, not prompt presentation.
+    summary = "\n".join(
+        f"- {item.get('server_name') or item.get('server_id')} / {item.get('name')}: "
+        f"{str(item.get('description') or '')[:240]}"
+        for item in tools
+    )
     return (
         "\n\nMCP TOOLS ARE AVAILABLE. Choose the appropriate MCP server and tool automatically "
         "from the user's request without asking the user for server_id or extra instructions.\n"
@@ -51,8 +57,8 @@ def _tool_prompt(tools: list[dict[str, Any]]) -> str:
         "\nIf the user's request needs one, respond with exactly one JSON object and nothing else: "
         '{"action":"mcp_call","server_id":"...","tool":"...","arguments":{}}' +
         "\nAfter the tool result, answer the user normally. Do not invent tool results. "
-        "For destructive or external side-effect actions (send, delete, modify, publish), "
-        "ask the user for confirmation before calling the tool."
+        "Only read-only MCP tools are exposed here. For write or side-effect actions, "
+        "use the agent flow that can request explicit confirmation."
     )
 
 
@@ -63,7 +69,11 @@ def complete_with_mcp(messages: list[dict[str, Any]], *, system: str, provider: 
     if not _mcp_allowed_for_user():
         return None, None, []
     try:
-        tools = mcp_registry.connected_tools()
+        discovered = mcp_registry.connected_tools()
+        # Ordinary chat has no interactive approval step. Keep it read-only;
+        # write-capable MCP tools are available through the confirmed agent flow.
+        tools = [item for item in discovered
+                 if (item.get("annotations") or {}).get("readOnlyHint") is True]
     except Exception:
         tools = []
     if not tools:
@@ -101,11 +111,15 @@ def complete_with_mcp(messages: list[dict[str, Any]], *, system: str, provider: 
             continue
         events.append({"type": "step", "icon": "🔌", "text": f"MCP: {server_id}:{tool}"})
         try:
-            import mcp_manager
-            outcome = mcp_manager.call_tool(server_id, tool, arguments)
+            import tool_registry
+            tool_registry.bootstrap_default_tools()
+            outcome = tool_registry.call_tool(
+                "mcp_call", server_id=server_id, tool=tool, arguments=arguments)
             if not outcome.get("ok"):
-                raise RuntimeError(outcome.get("error") or "Ошибка MCP")
-            result = outcome["result"]
+                error = outcome.get("error")
+                detail = error.get("message") if isinstance(error, dict) else error
+                raise RuntimeError(detail or "Ошибка MCP")
+            result = outcome.get("result")
             observation = json.dumps(result, ensure_ascii=False)
             events.append({"type": "tool", "name": "mcp_call", "command": f"{server_id}:{tool}", "code": 0})
         except Exception as exc:
