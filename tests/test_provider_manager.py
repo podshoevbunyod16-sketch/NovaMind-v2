@@ -222,3 +222,10 @@ def test_ai_providers_marks_pm_failure_on_transport_error(monkeypatch):
     assert key["invalid"] is False               # 429 → cooldown, а не permanent disable
     assert key["cooldown_remaining_sec"] > 0      # ключ временно заблокирован
     assert key["last_error"] == "rate_limit"
+
+
+
+def test_default_manager_tracks_current_gemini_model_id(monkeypatch):
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+    manager = pm.default_manager()
+    assert manager.status()["google_ai_studio"]["models"] == ["gemini-3.8-flash"]

@@ -457,11 +457,10 @@ def _env_keys(*names):
 
 
 def default_manager():
-    """ProviderManager со всеми провайдерами NovaMind и их ключами из env.
+    """ProviderManager со статусом ключей и cooldown для настроенных провайдеров.
 
-    Регистрируются только провайдеры, для которых заданы ключи; провайдеры
-    без ключей (local_demo, openai_compatible без ключа) не попадают в реестр
-    и не блокируют failover.
+    Выбор провайдера/модели остаётся за пользователем; этот реестр не выполняет
+    автоматическую подмену провайдера или модели.
     """
     import os
     manager = ProviderManager()
@@ -487,7 +486,7 @@ def default_manager():
     gemini = _env_keys("GEMINI_API_KEY", "GOOGLE_AI_STUDIO_KEY")
     if gemini:
         manager.register_provider("google_ai_studio", keys=gemini,
-                                  models=["gemini-2.0-flash", "gemini-2.0-flash-lite"])
+                                  models=["gemini-3.8-flash"])
 
     pollinations = _env_keys("POLLINATIONS_API_KEY", "POLLINATIONS_KEY", "POLLINATIONS_TOKEN")
     if pollinations:
