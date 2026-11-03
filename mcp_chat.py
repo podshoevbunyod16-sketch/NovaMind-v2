@@ -45,14 +45,12 @@ def _extract_action(text: str) -> dict[str, Any] | None:
 def _tool_prompt(tools: list[dict[str, Any]]) -> str:
     summary = mcp_registry.format_tools_summary(tools)
     return (
-        "\n\nMCP TOOLS ARE AVAILABLE. Choose the appropriate MCP server and tool automatically "
-        "from the user's request without asking the user for server_id or extra instructions.\n"
-        "Available MCP tools: " + summary +
-        "\nIf the user's request needs one, respond with exactly one JSON object and nothing else: "
-        '{"action":"mcp_call","server_id":"...","tool":"...","arguments":{}}' +
-        "\nAfter the tool result, answer the user normally. Do not invent tool results. "
-        "For destructive or external side-effect actions (send, delete, modify, publish), "
-        "ask the user for confirmation before calling the tool."
+        "\n\nMCP: при необходимости выбери инструмент из списка; не спрашивай server_id у пользователя. "
+        "Вызов — только JSON: "
+        '{"action":"mcp_call","server_id":"...","tool":"...","arguments":{}}'
+        ". Используй точные имена и схему; не выдумывай результат. После результата ответь пользователю. "
+        "Перед отправкой, удалением, изменением или публикацией запроси подтверждение.\n"
+        "Инструменты: " + summary
     )
 
 
