@@ -578,6 +578,51 @@ def _free_models(provider: str, selected: str = "") -> list[str]:
     return found
 
 
+_PM = None
+_PM_LOCK = __import__("threading").Lock()
+
+
+def provider_manager():
+    """Ленивый единый Provider Manager со всеми провайдерами из окружения."""
+    global _PM
+    if _PM is None:
+        with _PM_LOCK:
+            if _PM is None:
+                _PM = pm.default_manager()
+    return _PM
+
+
+def _pm_mark_failure(provider, model, error_text):
+    """Отмечает ошибку провайдера в едином менеджере (cooldown его ключа).
+
+    Провайдеры без зарегистрированных ключей (local_demo и т.п.) пропускаются.
+    """
+    try:
+        manager = provider_manager()
+        if provider not in manager.provider_names():
+            return
+        kind = pm.classify_error_text(error_text)
+        key = manager.available_key(provider)
+        if key is None:
+            return  # все ключи уже в cooldown — не используем их повторно
+        manager.mark_key_result(provider, key.index,
+                                pm.ProviderError(kind, pm.redact(str(error_text)[:300]),
+                                                 provider=provider, model=model))
+    except Exception:
+        logger.debug("pm mark failure failed", exc_info=True)
+
+
+def _pm_skip_provider(name):
+    """True, если у провайдера есть ключи, но все они сейчас в cooldown/отключены."""
+    try:
+        manager = provider_manager()
+        if name in manager.provider_names():
+            return manager.all_keys_unavailable(name)
+    except Exception:
+        pass
+    return False
+
+
 def free_failover_targets(provider: str | None = None, model: str | None = None) -> list[tuple[str, str]]:
     """Primary target followed by credentialed free alternatives."""
     import config
@@ -590,6 +635,10 @@ def free_failover_targets(provider: str | None = None, model: str | None = None)
             continue
         if (name != primary_provider and name not in {"local_demo", "openai_compatible"}
                 and not config.has_credentials(name)):
+            continue
+        if name != primary_provider and _pm_skip_provider(name):
+            pm.log_event("info", "provider_skipped", provider=name, model=model,
+                         reason="all keys in cooldown", result="skip")
             continue
         selected = primary_model if name == primary_provider else ""
         models = _free_models(name, selected)
@@ -645,6 +694,7 @@ def _chat_completion_once(messages, provider=None, model=None, system=None,
         )
 
     if error:
+        _pm_mark_failure(provider, model, error)
         return None, error
     try:
         message = (data.get("choices") or [{}])[0].get("message") or {}
@@ -978,6 +1028,8 @@ def _raw_stream(provider, model, payload, cfg, timeout):
             response.close()
         return
 
+    if last_error:
+        _pm_mark_failure(provider, model, last_error)
     yield "error", last_error or "Не удалось получить поток от провайдера"
 
 

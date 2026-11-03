@@ -25,6 +25,7 @@ from bs4 import BeautifulSoup
 
 import config
 import local_llm
+import ai_providers
 from ai_providers import chat_completion, chat_stream, resolve_target, PROVIDER_LABELS
 
 search_bp = Blueprint("search", __name__)
@@ -1455,4 +1456,6 @@ def ai_status():
         "search_alive": (cached or {}).get("ok"),
         "search_backends": (cached or {}).get("alive", []),
         "local_model": local_llm.MODEL_ID,
+        # Единый Provider Manager: ключи видны только номерами, без значений.
+        "providers": ai_providers.provider_manager().status(),
     })

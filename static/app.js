@@ -1656,7 +1656,10 @@ async function consumeReactResponse(response, api) {
       case 'token': api.appendToken(event.token || ''); break;
       case 'ask_user':
       case 'confirmation': api.askUser(event); break;
-      case 'completion': runId = event.run_id || runId; break;
+      case 'completion':
+        runId = event.run_id || runId;
+        if (runId && api.completion) api.completion(runId);
+        break;
       case 'error': api.step('⚠️', event.text || 'Ошибка агента'); break;
       case 'guard': api.step('🛡️', `Проверка безопасности: ${(event.reasons || []).join(', ')}`); break;
       case 'result': result = event; break;

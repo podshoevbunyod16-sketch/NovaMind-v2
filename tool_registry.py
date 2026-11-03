@@ -535,7 +535,15 @@ def _register_agent_tools():
     if get_tool("mcp_list") is None:
         def mcp_list(server_id="", offset=0, limit=20):
             import mcp_registry
+            import mcp_manager
+            summaries = {s.get("server_id"): s for s in mcp_manager.server_summaries()}
             result = mcp_registry.tools_page(str(server_id or ""), int(offset or 0), int(limit or 20))
+            if isinstance(result, dict):
+                sid = result.get("server_id") or str(server_id or "")
+                if sid in summaries:
+                    result["connected"] = bool(summaries[sid].get("connected", True))
+                    if summaries[sid].get("error"):
+                        result["server_error"] = summaries[sid]["error"]
             return {"ok": True, "result": result}
         register_tool(ToolSpec(
             "mcp_list", "Обнаружить настроенные MCP-серверы либо получить список инструментов и точные JSON Schema одного сервера. Для длинного списка используйте offset/next_offset.",

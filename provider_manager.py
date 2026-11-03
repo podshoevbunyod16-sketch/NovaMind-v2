@@ -450,16 +450,79 @@ class ProviderManager:
 
 
 # ---------- Общий реестр по умолчанию (заполняется из окружения) ----------
-def default_manager():
-    """ProviderManager, заполненный ключами Groq из окружения."""
+def _env_keys(*names):
+    """Непустые значения переменных окружения (в порядке имён)."""
     import os
-    keys = [os.getenv(f"GROQ_API_KEY_{i}", "").strip() for i in range(1, 10)]
-    keys = [k for k in keys if k]
-    if not keys and os.getenv("GROQ_API_KEY", "").strip():
-        keys = [os.getenv("GROQ_API_KEY").strip()]
+    return [os.getenv(name, "").strip() for name in names if os.getenv(name, "").strip()]
+
+
+def default_manager():
+    """ProviderManager со всеми провайдерами NovaMind и их ключами из env.
+
+    Регистрируются только провайдеры, для которых заданы ключи; провайдеры
+    без ключей (local_demo, openai_compatible без ключа) не попадают в реестр
+    и не блокируют failover.
+    """
+    import os
     manager = ProviderManager()
-    if keys:
-        manager.register_provider("groq", keys=keys,
+
+    groq_keys = [os.getenv(f"GROQ_API_KEY_{i}", "").strip() for i in range(1, 10)]
+    groq_keys = [k for k in groq_keys if k]
+    if not groq_keys and os.getenv("GROQ_API_KEY", "").strip():
+        groq_keys = [os.getenv("GROQ_API_KEY").strip()]
+    if groq_keys:
+        manager.register_provider("groq", keys=groq_keys,
                                   models=["openai/gpt-oss-120b", "openai/gpt-oss-20b",
                                           "qwen/qwen3.8-27b"])
+
+    cerebras = _env_keys("CEREBRAS_API_KEY")
+    if cerebras:
+        manager.register_provider("cerebras", keys=cerebras,
+                                  models=["qwen-3-235b-a22b-instruct-2507", "zai-glm-4.7"])
+
+    openrouter = _env_keys("OPENROUTER_API_KEY")
+    if openrouter:
+        manager.register_provider("openrouter", keys=openrouter, models=[])
+
+    gemini = _env_keys("GEMINI_API_KEY", "GOOGLE_AI_STUDIO_KEY")
+    if gemini:
+        manager.register_provider("google_ai_studio", keys=gemini,
+                                  models=["gemini-2.0-flash", "gemini-2.0-flash-lite"])
+
+    pollinations = _env_keys("POLLINATIONS_API_KEY", "POLLINATIONS_KEY", "POLLINATIONS_TOKEN")
+    if pollinations:
+        manager.register_provider("pollinations", keys=pollinations, models=[])
+
+    oai = _env_keys("OPENAI_COMPATIBLE_KEY", "OPENAI_API_KEY")
+    if oai:
+        manager.register_provider("openai_compatible", keys=oai,
+                                  models=[os.getenv("LOCAL_MODEL_ID", "local-llama")])
+
     return manager
+
+
+def classify_error_text(text):
+    """Классификация по тексту ошибки транспорта (для обратной совместимости
+    с функциями, возвращающими (data, error_string))."""
+    lowered = str(text or "").lower()
+    if "401" in lowered or "auth" in lowered and "ключ" in lowered:
+        return ErrorKind.AUTH
+    if "403" in lowered or "forbidden" in lowered or "запрещён" in lowered:
+        return ErrorKind.FORBIDDEN
+    if "404" in lowered or "не найден" in lowered or "not found" in lowered:
+        return ErrorKind.NOT_FOUND
+    if "429" in lowered or "rate limit" in lowered or "лимит запросов" in lowered:
+        return ErrorKind.RATE_LIMIT
+    if "billing" in lowered or "insufficient funds" in lowered or "оплат" in lowered:
+        return ErrorKind.BILLING
+    if "quota" in lowered or "квота" in lowered:
+        return ErrorKind.QUOTA
+    if "таймаут" in lowered or "timeout" in lowered:
+        return ErrorKind.TIMEOUT
+    if "недоступен" in lowered or "connection" in lowered or "network" in lowered:
+        return ErrorKind.NETWORK
+    if "5" in lowered and any(f"http 5" in lowered for _ in (0,)):
+        return ErrorKind.SERVER
+    if "некорректный json" in lowered or "неожиданный формат" in lowered:
+        return ErrorKind.BAD_RESPONSE
+    return ErrorKind.UNKNOWN

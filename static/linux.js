@@ -166,7 +166,10 @@
           case 'retract': turn.appendText(''); break;
           case 'error': failure = event.text; turn.step('⚠️', event.text); break;
           case 'guard': turn.step('🛡️', `Проверка безопасности: ${(event.reasons || []).join(', ')}`); break;
-          case 'completion': completionRunId = event.run_id || completionRunId; break;
+          case 'completion':
+            completionRunId = event.run_id || completionRunId;
+            if (completionRunId && turn.completion) turn.completion(completionRunId);
+            break;
           case 'ask_user': if (turn.askUser) turn.askUser(event); break;
           case 'confirmation': if (turn.askUser) turn.askUser(event); break;
           case 'result':

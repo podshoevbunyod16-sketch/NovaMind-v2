@@ -176,3 +176,49 @@ def test_status_and_logs_never_expose_keys(caplog):
 def test_redact_strips_bearer_and_key_values():
     assert "abc123token" not in pm.redact("Authorization: Bearer abc123token", ["abc123token"])
     assert "api_key=xyz" not in pm.redact("api_key=xyz")
+
+
+# ---------- интеграция с ai_providers ----------
+
+def test_default_manager_registers_all_env_providers(monkeypatch):
+    monkeypatch.setenv("GROQ_API_KEY_1", "g1")
+    monkeypatch.setenv("GROQ_API_KEY_2", "g2")
+    monkeypatch.setenv("CEREBRAS_API_KEY", "c1")
+    monkeypatch.setenv("GEMINI_API_KEY", "gm1")
+    manager = pm.default_manager()
+    names = manager.provider_names()
+    assert {"groq", "cerebras", "google_ai_studio"} <= set(names)
+    assert len(manager.status()["groq"]["keys"]) == 2
+    assert "g1" not in str(manager.status())
+
+
+def test_ai_providers_failover_skips_provider_with_all_keys_in_cooldown(monkeypatch):
+    import ai_providers
+    monkeypatch.setattr(ai_providers, "resolve_target", lambda *a, **k: (
+        "local_demo", "nova-local-1", {}))
+    import config
+    monkeypatch.setattr(config, "has_credentials", lambda provider: True)
+    manager = pm.ProviderManager(sleep=lambda s: None)
+    manager.register_provider("groq", keys=["k1"])
+    manager.mark_key_result("groq", 0, pm.ProviderError(pm.ErrorKind.QUOTA, "daily quota"))
+    monkeypatch.setattr(ai_providers, "_PM", manager)
+    targets = ai_providers.free_failover_targets("groq", "openai/gpt-oss-120b")
+    assert all(p != "groq" for p, _m in targets)
+
+
+def test_ai_providers_marks_pm_failure_on_transport_error(monkeypatch):
+    import ai_providers
+    manager = pm.ProviderManager(sleep=lambda s: None)
+    manager.register_provider("cerebras", keys=["c1"])
+    monkeypatch.setattr(ai_providers, "_PM", manager)
+    monkeypatch.setattr(ai_providers, "resolve_target", lambda *a, **k: (
+        "cerebras", "m", {"url": "https://api.cerebras.ai/v1/chat/completions", "max_tokens": 8}))
+    monkeypatch.setattr(ai_providers, "openai_compatible_request",
+                        lambda *a, **k: (None, "Сервер вернул HTTP 429: rate limit"))
+    monkeypatch.setattr(ai_providers, "provider_headers", lambda p: {})
+    text, meta = ai_providers._chat_completion_once([{"role": "user", "content": "hi"}])
+    assert text is None
+    key = manager.status()["cerebras"]["keys"][0]
+    assert key["invalid"] is False               # 429 → cooldown, а не permanent disable
+    assert key["cooldown_remaining_sec"] > 0      # ключ временно заблокирован
+    assert key["last_error"] == "rate_limit"
