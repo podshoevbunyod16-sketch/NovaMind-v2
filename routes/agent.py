@@ -759,11 +759,17 @@ class NovaToolsContext:
     # ── что доступно ─────────────────────────────────────────────────────
     @staticmethod
     def _mcp_tools(owner=""):
-        if not _identity.is_admin_owner(owner) and os.getenv("MCP_ALLOW_USER_READ", "0") != "1":
+        is_admin = _identity.is_admin_owner(owner)
+        if not is_admin and os.getenv("MCP_ALLOW_USER_READ", "0") != "1":
             return []
         try:
             import mcp_manager
-            return mcp_manager.discover_tools()
+            tools = mcp_manager.discover_tools()
+            if not is_admin:
+                # Read access must never expose side-effecting MCP tools.
+                tools = [tool for tool in tools
+                         if (tool.get("annotations") or {}).get("readOnlyHint") is True]
+            return tools
         except Exception:  # noqa: BLE001 — MCP необязателен
             log.debug("MCP недоступен", exc_info=True)
             return []
@@ -798,6 +804,13 @@ class NovaToolsContext:
 
     # ── действия ─────────────────────────────────────────────────────────
     def call_mcp(self, server_id: str, tool: str, arguments: dict):
+        if not _identity.is_admin_owner(self.owner):
+            if os.getenv("MCP_ALLOW_USER_READ", "0") != "1":
+                raise PermissionError("Вызов MCP разрешён только администратору")
+            import mcp_registry
+            annotations = mcp_registry.cached_tool_annotations(server_id, tool)
+            if not annotations or annotations.get("readOnlyHint") is not True:
+                raise PermissionError("Пользователям разрешены только MCP-инструменты с readOnlyHint=true")
         import mcp_manager
         outcome = mcp_manager.call_tool(server_id, tool, arguments)
         if not outcome.get("ok"):
