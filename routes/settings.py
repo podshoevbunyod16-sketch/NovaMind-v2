@@ -154,13 +154,18 @@ def settings_models():
     if provider not in PROVIDERS:
         return jsonify({"error": "Неизвестный провайдер"}), 400
     # Каталог Pollinations публичный: показываем модели даже без ключа.
-    if not provider_status().get(provider, False) and provider != "pollinations":
+    configured = bool(provider_status().get(provider, False))
+    if not configured and provider != "pollinations":
         return jsonify({"provider": provider, "models": [], "configured": False,
+                        "selection_allowed": False,
                         "error": "API ключ провайдера не найден в .env"})
     models = fetch_available_models(provider, force=force)
     error = None if models else (MODEL_ERRORS.get(provider) or "Не удалось получить каталог моделей.")
-    return jsonify({"provider": provider, "models": models, "configured": True,
-                    "error": error, "current_model": config.current_model if provider == config.current_provider else None})
+    hint = ("Каталог публичный, но для генерации через Pollinations нужен API-ключ."
+            if provider == "pollinations" and not configured else None)
+    return jsonify({"provider": provider, "models": models, "configured": configured,
+                    "selection_allowed": configured, "hint": hint, "error": error,
+                    "current_model": config.current_model if provider == config.current_provider else None})
 
 @settings_bp.route('/api/settings/media-models')
 def settings_media_models():
@@ -240,7 +245,9 @@ def settings_select():
     model = data.get("model", "").strip()
     if provider not in PROVIDERS or not model:
         return jsonify({"error": "Укажите провайдера и модель"}), 400
-    models = fetch_available_models(provider)
+    if not config.has_credentials(provider):
+        return jsonify({"error": "Провайдер не настроен: добавьте API-ключ перед выбором модели."}), 400
+    models = fetch_available_models(provider, force=True)
     if not any(item["id"] == model for item in models):
         return jsonify({"error": "Модель не найдена в каталоге провайдера."}), 400
     config.current_provider = provider
