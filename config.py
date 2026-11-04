@@ -340,24 +340,30 @@ load_runtime_settings()
 
 
 # ---------- Доступность провайдеров ----------
+def _configured_env_keys(*names: str) -> list[str]:
+    """Return configured base and numbered API keys in stable, unique order."""
+    values = []
+    for name in names:
+        for candidate in (name, *(f"{name}_{index}" for index in range(1, 10))):
+            value = os.getenv(candidate, "").strip()
+            if value and value not in values:
+                values.append(value)
+    return values
+
+
 def has_credentials(provider: str) -> bool:
-    """Подключён ли провайдер (есть ключ / не требует ключа вовсе)."""
-    if provider == "groq":
-        keys = [os.getenv("GROQ_API_KEY", "")] + [os.getenv(f"GROQ_API_KEY_{i}", "") for i in range(1, 10)]
-        return any(k.strip() for k in keys)
-    if provider == "cerebras":
-        return bool(os.getenv("CEREBRAS_API_KEY", "").strip())
-    if provider == "openrouter":
-        return bool(os.getenv("OPENROUTER_API_KEY", "").strip())
-    if provider == "google_ai_studio":
-        return bool((os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_AI_STUDIO_KEY") or "").strip())
-    if provider == "pollinations":
-        # Каталог моделей публичный, но генерация текста требует ключ.
-        return bool((os.getenv("POLLINATIONS_API_KEY")
-                     or os.getenv("POLLINATIONS_KEY")
-                     or os.getenv("POLLINATIONS_TOKEN") or "").strip())
+    """Whether a provider has at least one configured credential or needs none."""
+    key_names = {
+        "groq": ("GROQ_API_KEY",),
+        "cerebras": ("CEREBRAS_API_KEY",),
+        "openrouter": ("OPENROUTER_API_KEY",),
+        "google_ai_studio": ("GEMINI_API_KEY", "GOOGLE_AI_STUDIO_KEY"),
+        "pollinations": ("POLLINATIONS_API_KEY", "POLLINATIONS_KEY", "POLLINATIONS_TOKEN"),
+    }
+    if provider in key_names:
+        return bool(_configured_env_keys(*key_names[provider]))
     if provider == "openai_compatible":
-        # Локальный llama-server / Ollama ключ не требуют.
+        # Local llama-server / Ollama endpoints may not require an API key.
         return True
     if provider == "local_demo":
         return True

@@ -1215,29 +1215,34 @@ def normalize_model(model, provider):
         "created": model.get("created", 0), "description": model.get("description", ""),
     }
 
+def _catalog_api_key(provider):
+    """Use the first currently available key from the shared provider manager."""
+    state = provider_manager().available_key(provider)
+    return state.key if state is not None else ""
+
+
 def provider_api_headers(provider):
-    from config import PROVIDERS
     from groq_rotation import get_groq_key
     if provider == "groq":
         key = get_groq_key()
         return {"Authorization": f"Bearer {key}", "Content-Type": "application/json"} if key else None
     if provider == "openrouter":
-        key = os.getenv("OPENROUTER_API_KEY", "")
+        key = _catalog_api_key(provider)
         return {"Authorization": f"Bearer {key}", "Content-Type": "application/json",
                 "HTTP-Referer": "http://localhost:5000", "X-Title": "NovaMind AI"} if key else None
     if provider == "cerebras":
-        key = os.getenv("CEREBRAS_API_KEY", "")
+        key = _catalog_api_key(provider)
         return {"Authorization": f"Bearer {key}", "Content-Type": "application/json"} if key else None
     if provider == "google_ai_studio":
-        key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_AI_STUDIO_KEY") or ""
+        key = _catalog_api_key(provider)
         return {"x-goog-api-key": key, "Content-Type": "application/json"} if key else None
     if provider == "pollinations":
-        key = (os.getenv("POLLINATIONS_API_KEY") or os.getenv("POLLINATIONS_KEY") or os.getenv("POLLINATIONS_TOKEN") or "").strip()
+        key = _catalog_api_key(provider)
         headers = {"Content-Type": "application/json"}
         if key:
             headers["Authorization"] = f"Bearer {key}"
         return headers
-    key = os.getenv("OPENAI_COMPATIBLE_KEY") or os.getenv("OPENAI_API_KEY") or "ollama"
+    key = _catalog_api_key(provider) or os.getenv("OPENAI_COMPATIBLE_KEY") or os.getenv("OPENAI_API_KEY") or "ollama"
     return {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
 
 def _local_model_fallback():
@@ -1293,15 +1298,15 @@ def _local_catalog_urls():
     return list(dict.fromkeys(candidates))
 
 def fetch_available_models(provider, force=False):
-    from config import PROVIDERS, MODEL_CACHE
+    from config import PROVIDERS, MODEL_CACHE, has_credentials
     if not force and provider in MODEL_CACHE:
         return MODEL_CACHE[provider]
 
     if provider == "openrouter":
         urls = ["https://openrouter.ai/api/v1/models"]
     elif provider == "google_ai_studio":
-        if not (os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_AI_STUDIO_KEY")):
-            MODEL_ERRORS[provider] = "GEMINI_API_KEY не найден в .env"
+        if not has_credentials(provider):
+            MODEL_ERRORS[provider] = "GEMINI_API_KEY / GOOGLE_AI_STUDIO_KEY не найден (проверьте также суффиксы _1…_9)"
             return []
         urls = ["https://generativelanguage.googleapis.com/v1beta/models"]
     elif provider == "groq":

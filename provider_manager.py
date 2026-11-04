@@ -473,10 +473,9 @@ def default_manager():
     import os
     manager = ProviderManager()
 
-    groq_keys = [os.getenv(f"GROQ_API_KEY_{i}", "").strip() for i in range(1, 10)]
-    groq_keys = [k for k in groq_keys if k]
-    if not groq_keys and os.getenv("GROQ_API_KEY", "").strip():
-        groq_keys = [os.getenv("GROQ_API_KEY").strip()]
+    # Include the base key even when numbered keys are also configured.
+    # The previous conditional silently dropped GROQ_API_KEY whenever _1 existed.
+    groq_keys = _env_keys("GROQ_API_KEY")
     if groq_keys:
         manager.register_provider("groq", keys=groq_keys,
                                   models=["openai/gpt-oss-120b", "openai/gpt-oss-20b",

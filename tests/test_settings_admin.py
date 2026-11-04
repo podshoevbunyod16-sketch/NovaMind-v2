@@ -73,3 +73,21 @@ def test_settings_links_are_hidden_for_non_admins():
     assert "Настройки доступны только администратору" in app_js
     # Права берём у сервера, а не только из localStorage.
     assert "/api/session/check" in app_js
+
+
+def test_admin_cannot_select_pollinations_without_generation_key(admin_client, monkeypatch):
+    import config
+    import routes.settings as settings_routes
+
+    monkeypatch.setattr(config, "has_credentials", lambda provider: provider != "pollinations")
+    monkeypatch.setattr(settings_routes, "fetch_available_models", lambda provider, force=False: [
+        {"id": "public-catalog-model", "name": "Public catalog model"}
+    ])
+
+    response = admin_client.post("/api/settings/select", json={
+        "provider": "pollinations", "model": "public-catalog-model"
+    })
+
+    assert response.status_code == 400
+    assert "API-ключ" in response.get_json()["error"]
+

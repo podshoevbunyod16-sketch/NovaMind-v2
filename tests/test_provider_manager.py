@@ -8,6 +8,13 @@ import requests
 import provider_manager as pm
 
 
+def clear_key_family(monkeypatch, *names):
+    for name in names:
+        monkeypatch.delenv(name, raising=False)
+        for index in range(1, 10):
+            monkeypatch.delenv(f"{name}_{index}", raising=False)
+
+
 def make_manager(keys=("k1", "k2", "k3"), sleeps=None):
     manager = pm.ProviderManager(sleep=lambda s: (sleeps or []).append(s))
     manager.register_provider("groq", keys=list(keys), models=["m1"])
@@ -309,3 +316,83 @@ def test_openai_compatible_stream_rotates_keys_before_opening_stream(monkeypatch
     assert error is None and response is not None
     assert seen == ["Bearer stream-bad", "Bearer stream-good"]
     assert response._novamind_key_index == 1
+
+
+def test_default_manager_keeps_base_groq_key_when_numbered_keys_exist(monkeypatch):
+    clear_key_family(monkeypatch, "GROQ_API_KEY")
+    monkeypatch.setenv("GROQ_API_KEY", "groq-base")
+    monkeypatch.setenv("GROQ_API_KEY_1", "groq-numbered")
+    manager = pm.default_manager()
+    seen = []
+
+    def limited(key):
+        seen.append(key.key)
+        raise pm.ProviderError(pm.ErrorKind.RATE_LIMIT, "limited", retry_after=0)
+
+    manager.execute("groq", "openai/gpt-oss-120b", limited, max_attempts=5)
+
+    assert seen == ["groq-base", "groq-numbered"]
+
+
+@pytest.mark.parametrize("provider,env_name", [
+    ("groq", "GROQ_API_KEY_1"),
+    ("cerebras", "CEREBRAS_API_KEY_1"),
+    ("openrouter", "OPENROUTER_API_KEY_1"),
+    ("google_ai_studio", "GEMINI_API_KEY_1"),
+    ("google_ai_studio", "GOOGLE_AI_STUDIO_KEY_2"),
+    ("pollinations", "POLLINATIONS_API_KEY_1"),
+])
+def test_config_reports_numbered_provider_keys_as_configured(monkeypatch, provider, env_name):
+    import config
+
+    families = {
+        "groq": ("GROQ_API_KEY",),
+        "cerebras": ("CEREBRAS_API_KEY",),
+        "openrouter": ("OPENROUTER_API_KEY",),
+        "google_ai_studio": ("GEMINI_API_KEY", "GOOGLE_AI_STUDIO_KEY"),
+        "pollinations": ("POLLINATIONS_API_KEY", "POLLINATIONS_KEY", "POLLINATIONS_TOKEN"),
+    }
+    clear_key_family(monkeypatch, *families[provider])
+    monkeypatch.setenv(env_name, "configured-test-key")
+
+    assert config.has_credentials(provider) is True
+
+
+@pytest.mark.parametrize("provider,env_name,header", [
+    ("openrouter", "OPENROUTER_API_KEY_1", "Authorization"),
+    ("cerebras", "CEREBRAS_API_KEY_1", "Authorization"),
+    ("google_ai_studio", "GEMINI_API_KEY_1", "x-goog-api-key"),
+    ("pollinations", "POLLINATIONS_API_KEY_1", "Authorization"),
+])
+def test_model_catalog_headers_use_numbered_provider_keys(monkeypatch, provider, env_name, header):
+    import ai_providers
+
+    families = {
+        "openrouter": ("OPENROUTER_API_KEY",),
+        "cerebras": ("CEREBRAS_API_KEY",),
+        "google_ai_studio": ("GEMINI_API_KEY", "GOOGLE_AI_STUDIO_KEY"),
+        "pollinations": ("POLLINATIONS_API_KEY", "POLLINATIONS_KEY", "POLLINATIONS_TOKEN"),
+    }
+    clear_key_family(monkeypatch, *families[provider])
+    monkeypatch.setenv(env_name, "catalog-test-key")
+    monkeypatch.setattr(ai_providers, "_PM", None)
+
+    headers = ai_providers.provider_api_headers(provider)
+
+    assert headers[header] == ("Bearer catalog-test-key" if header == "Authorization" else "catalog-test-key")
+
+
+def test_groq_rotation_loads_base_and_numbered_keys_together(monkeypatch):
+    import groq_rotation
+
+    clear_key_family(monkeypatch, "GROQ_API_KEY")
+    monkeypatch.setenv("GROQ_API_KEY", "base-key")
+    monkeypatch.setenv("GROQ_API_KEY_1", "numbered-key")
+    monkeypatch.setenv("GROQ_API_KEY_2", "base-key")  # duplicate values are ignored
+
+    keys = groq_rotation._load_groq_keys()
+
+    assert [(item["index"], item["key"]) for item in keys] == [
+        (0, "base-key"), (1, "numbered-key")
+    ]
+

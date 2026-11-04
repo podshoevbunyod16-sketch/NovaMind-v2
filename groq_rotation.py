@@ -13,17 +13,27 @@ AUTH_FAILURE_THRESHOLD = max(2, int(os.getenv("GROQ_401_FAILURE_THRESHOLD", "3")
 GROQ_KEY_COOLDOWN = 25 * 3600
 GROQ_RATE_LIMIT_COOLDOWN = 60
 
-GROQ_KEYS = []
-for i in range(1, 10):
-    key = os.getenv(f"GROQ_API_KEY_{i}", "").strip()
-    if key:
-        GROQ_KEYS.append({"key": key, "index": i, "exhausted_at": None, "cooldown_seconds": GROQ_RATE_LIMIT_COOLDOWN, "invalid": False, "auth_failures": 0})
-
-# Main key is used only when numbered keys are absent, avoiding duplicate attempts.
-if not GROQ_KEYS:
+def _load_groq_keys():
+    """Load the base Groq key and numbered keys without duplicate values."""
+    keys = []
+    seen = set()
     main_key = os.getenv("GROQ_API_KEY", "").strip()
     if main_key:
-        GROQ_KEYS.append({"key": main_key, "index": 0, "exhausted_at": None, "cooldown_seconds": GROQ_RATE_LIMIT_COOLDOWN, "invalid": False, "auth_failures": 0})
+        keys.append({"key": main_key, "index": 0, "exhausted_at": None,
+                     "cooldown_seconds": GROQ_RATE_LIMIT_COOLDOWN,
+                     "invalid": False, "auth_failures": 0})
+        seen.add(main_key)
+    for index in range(1, 10):
+        key = os.getenv(f"GROQ_API_KEY_{index}", "").strip()
+        if key and key not in seen:
+            keys.append({"key": key, "index": index, "exhausted_at": None,
+                         "cooldown_seconds": GROQ_RATE_LIMIT_COOLDOWN,
+                         "invalid": False, "auth_failures": 0})
+            seen.add(key)
+    return keys
+
+
+GROQ_KEYS = _load_groq_keys()
 
 groq_key_index = 0
 _groq_lock = threading.Lock()
