@@ -192,3 +192,22 @@ def test_discover_tools_keeps_cached_tools_of_dead_server(tmp_path, monkeypatch)
         assert cached and cached[0].get("degraded") is True
     finally:
         mcp_registry.remove_connection(sid)
+
+
+def test_command_code_uses_chat_completion_meta_correctly(client, monkeypatch):
+    """Регрессия: chat_completion возвращает (text, meta-dict) при успехе —
+    meta не должен попадать в поле error (реальный вызов /command падал)."""
+    import routes.commands as commands_mod
+    captured = {}
+
+    def fake_completion(messages, **kwargs):
+        captured["messages"] = messages
+        return "print('hello')", {"provider": "local_demo", "model": "nova-local-1",
+                                   "failover": [], "free_model": True}
+
+    monkeypatch.setattr(commands_mod, "chat_completion", fake_completion)
+    resp = client.post("/command", json={"command": "/code hello world"})
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert "error" not in data, data
+    assert data["result"] == "print('hello')"

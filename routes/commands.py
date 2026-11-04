@@ -106,7 +106,7 @@ def handle_command():
                 history + [{"role": "user", "content": rendered_prompt}],
                 system=config.system_prompt, temperature=0.7, max_tokens=3000, timeout=120,
             )
-            if error or reply is None:
+            if reply is None:
                 return jsonify({'error': str(error or "Модель не вернула ответ")})
             add_message(chat_id, "assistant", reply)
             return jsonify({'result': reply})
@@ -133,7 +133,7 @@ def handle_command():
             system="Ты программист. Пиши чистый код с комментариями.",
             temperature=0.3, max_tokens=3000, timeout=60,
         )
-        if error or reply is None:
+        if reply is None:
             return jsonify({'error': str(error or "Модель не вернула ответ")})
         return jsonify({'result': reply})
 
@@ -195,7 +195,7 @@ def handle_command():
             [{"role": "user", "content": analysis_prompt}],
             temperature=0.3, max_tokens=8192, timeout=60,
         )
-        if error or analysis is None:
+        if analysis is None:
             analysis = f"Анализ не удался: {error}.\n\nИспользую сырой поиск:\n{search_result[:1000]}" 
 
         final_prompt = f"""На основе анализа напиши подробный, структурированный ответ на вопрос: "{query}"
@@ -220,7 +220,7 @@ def handle_command():
             [{"role": "user", "content": final_prompt}],
             temperature=0.5, max_tokens=8192, timeout=90,
         )
-        if error or final_answer is None:
+        if final_answer is None:
             final_answer = f"**🔍 Результаты поиска:**\n\n{search_result}\n\n**📊 Анализ:**\n\n{analysis}\n\n_(Финальный ответ не удалось сгенерировать: {error})_" 
 
         return jsonify({'result': final_answer})

@@ -284,7 +284,7 @@ def _call_selected_text_ai(prompt):
         system=config.system_prompt, temperature=0.3,
         max_tokens=max_tokens, timeout=120,
     )
-    if error or text is None:
+    if text is None:
         return None, str(error or 'AI вернул неожиданный формат ответа.')
     return text, None
 
