@@ -252,8 +252,8 @@ def _find_exa_mcp_tool():
     if not _mcp_search_allowed():
         return None
     try:
-        import mcp_registry
-        tools = mcp_registry.connected_tools()
+        import mcp_manager
+        tools = mcp_manager.discover_tools()
     except Exception:
         return None
     for tool in tools:
@@ -274,8 +274,8 @@ def _find_mcp_search_tool():
     if exa:
         return exa
     try:
-        import mcp_registry
-        tools = mcp_registry.connected_tools()
+        import mcp_manager
+        tools = mcp_manager.discover_tools()
     except Exception:
         return None
     preferred = {"web_search", "search_with_contents", "search_web", "search"}
@@ -327,13 +327,15 @@ def search_web_exa_mcp(query, num=8, tool=None):
     tool = tool or _find_mcp_search_tool()
     if not tool:
         return [], "MCP search не подключён"
-    import mcp_registry
+    import mcp_manager
     server_id, tool_name = str(tool.get("server_id") or ""), str(tool.get("name") or "")
     if not _mcp_tool_readonly_allowed(server_id, tool_name):
         return [], "MCP search недоступен: инструмент не подтверждён как read-only"
-    result = mcp_registry.call_tool(
-        server_id, tool_name,
-        _exa_mcp_arguments(tool, query, num))
+    outcome = mcp_manager.call_tool(server_id, tool_name,
+                                    _exa_mcp_arguments(tool, query, num))
+    if not outcome.get("ok"):
+        return [], f"MCP search error: {outcome.get('error')}"
+    result = outcome["result"]
     results = _exa_mcp_results(result)
     if not results:
         return [], "Exa MCP: пустая выдача"

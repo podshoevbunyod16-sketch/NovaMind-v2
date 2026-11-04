@@ -93,10 +93,10 @@ def test_tools_catalog_uses_the_single_registry(monkeypatch):
 
 
 def test_mcp_catalog_is_read_only_and_request_local(monkeypatch):
-    import mcp_registry
+    import mcp_manager
     import tool_registry
     monkeypatch.setattr(tool_registry, "bootstrap_default_tools", lambda: None)
-    monkeypatch.setattr(mcp_registry, "connected_tools", lambda: [{"server_id": "demo", "name": "search"}])
+    monkeypatch.setattr(mcp_manager, "discover_tools", lambda: [{"server_id": "demo", "name": "search"}])
     result = _run_python_gateway(["python3", "-m", "novamind_cli", "mcp", "tools"])
     assert result["exit_code"] == 0
     assert json.loads(result["stdout"]) == [{"server_id": "demo", "name": "search"}]
