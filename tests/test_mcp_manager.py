@@ -3,6 +3,7 @@
 import json
 import sys
 import textwrap
+import time
 
 import pytest
 
@@ -118,3 +119,20 @@ def test_call_tool_error_isolated(stdio_server):
     result = mcp_manager.call_tool(stdio_server, "no_such_tool", {})
     assert result["ok"] is False
     assert "no_such_tool" in result["error"]
+
+
+
+def test_discovery_keeps_fresh_cached_tools_for_degraded_server(stdio_server, monkeypatch):
+    cached_tool = {
+        "name": "echo", "description": "cached echo",
+        "inputSchema": {"type": "object"}, "annotations": {"readOnlyHint": True},
+    }
+    mcp_registry._TOOL_CACHE[stdio_server] = (time.monotonic() + 60, [cached_tool])
+    monkeypatch.setattr(mcp_registry, "connected_tools", lambda: [])
+
+    tools = mcp_manager.discover_tools()
+
+    assert len(tools) == 1
+    assert tools[0]["server_id"] == stdio_server
+    assert tools[0]["name"] == "echo"
+    assert tools[0]["degraded"] is True

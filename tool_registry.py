@@ -77,8 +77,8 @@ def tool_schemas(workspace: bool | None = None) -> list[dict]:
                 "permissions": list(t.permissions), "timeout": t.timeout,
                 "risk": t.risk} for t in specs]
     try:
-        import mcp_registry
-        connected = mcp_registry.connected_tools()
+        import mcp_manager
+        connected = mcp_manager.discover_tools()
         if connected:
             available = ", ".join(f"{x['server_id']}:{x['name']}" for x in connected)
             # Если mcp_call уже зарегистрирован, не дублируем его, а дополняем
@@ -550,6 +550,7 @@ def _register_agent_tools():
         def mcp_call(server_id, tool, arguments=None):
             import identity
             import mcp_registry
+            import mcp_manager
             server_id, tool = str(server_id or "").strip(), str(tool or "").strip()
             if not server_id or not tool:
                 return {"ok": False, "error": {"type": "bad_arguments",
@@ -564,7 +565,12 @@ def _register_agent_tools():
                     return {"ok": False, "error": {"type": "permission_denied",
                         "message": "Пользователям разрешены только MCP-инструменты с readOnlyHint=true",
                         "retryable": False}}
-            result = mcp_registry.call_tool(server_id, tool, arguments or {})
+            outcome = mcp_manager.call_tool(server_id, tool, arguments or {})
+            if not outcome.get("ok"):
+                return {"ok": False, "error": {"type": "mcp_error",
+                                               "message": outcome.get("error", "Ошибка MCP"),
+                                               "retryable": True}}
+            result = outcome["result"]
             if isinstance(result, dict) and result.get("isError"):
                 details = result.get("content") if isinstance(result.get("content"), list) else []
                 message = "; ".join(str(item.get("text") or "") for item in details

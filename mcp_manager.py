@@ -84,8 +84,23 @@ def health_check_all():
 
 
 def discover_tools():
-    """Инструменты всех серверов; недоступный сервер даёт пустой список."""
-    return registry.connected_tools()
+    """Discover tools independently; retain fresh cached tools for degraded servers."""
+    tools = registry.connected_tools()
+    alive = {tool.get("server_id") for tool in tools}
+    for sid, item in registry._read().items():
+        if not isinstance(item, dict) or sid in alive:
+            continue
+        cached = registry._TOOL_CACHE.get(sid)
+        if cached and cached[0] > time.monotonic():
+            for tool in cached[1]:
+                entry = dict(tool)
+                entry["server_id"] = sid
+                entry["server_name"] = item.get("name", sid)
+                entry["transport"] = item.get("transport", "streamable_http")
+                entry["degraded"] = True
+                tools.append(entry)
+    tools.sort(key=lambda item: (str(item.get("server_id", "")), str(item.get("name", ""))))
+    return tools
 
 
 def server_summaries():
