@@ -11,7 +11,7 @@ import base64
 import zipfile
 import xml.etree.ElementTree as ET
 import requests
-from ai_providers import groq_request_with_rotation
+from ai_providers import chat_completion
 from groq_rotation import get_groq_key, GROQ_KEYS
 import config
 import media_generation as mg
@@ -275,27 +275,18 @@ def _analyze_image_file(filepath, filename, content_type, user_desc):
     }), 503
 
 def _call_selected_text_ai(prompt):
-    provider = config.PROVIDERS.get(config.current_provider)
-    if not provider:
+    # Единый слой провайдеров: ротация ключей, cooldown, failover между моделями.
+    if config.current_provider not in config.PROVIDERS:
         return None, f'Неизвестный AI-провайдер: {config.current_provider}'
-    payload = {
-        'model': config.current_model,
-        'messages': [
-            {'role': 'system', 'content': config.system_prompt},
-            {'role': 'user', 'content': prompt}
-        ],
-        'temperature': 0.3,
-        'max_tokens': min(provider.get('max_tokens', 8192), 8192)
-    }
-    data, error = groq_request_with_rotation(
-        provider.get('url',''), payload, provider.get('headers',{}).copy(), timeout=120
+    max_tokens = min(config.PROVIDERS[config.current_provider].get('max_tokens', 8192), 8192)
+    text, error = chat_completion(
+        [{'role': 'user', 'content': prompt}],
+        system=config.system_prompt, temperature=0.3,
+        max_tokens=max_tokens, timeout=120,
     )
-    if error:
-        return None, error
-    try:
-        return data['choices'][0]['message']['content'], None
-    except (KeyError, IndexError, TypeError):
-        return None, 'AI вернул неожиданный формат ответа.'
+    if error or text is None:
+        return None, str(error or 'AI вернул неожиданный формат ответа.')
+    return text, None
 
 
 # ========== МУЛЬТИМЕДИА ==========

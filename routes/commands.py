@@ -10,7 +10,7 @@ import requests
 from datetime import datetime
 from database import (get_or_create_session_chat, get_chat_history, add_message,
                       create_chat)
-from ai_providers import groq_request_with_rotation
+from ai_providers import chat_completion
 from groq_rotation import get_groq_key
 from routes.search import search_web
 from config import PROVIDERS, plugins, save_custom_commands
@@ -101,20 +101,13 @@ def handle_command():
             rendered_prompt = prompt_template.replace("{query}", query)
             chat_id, history = _chat_contents()
             add_message(chat_id, "user", rendered_prompt)
-            provider = PROVIDERS[config.current_provider]
-            payload = {
-                "model": config.current_model,
-                "messages": [{"role": "system", "content": config.system_prompt}] + history +
-                          [{"role": "user", "content": rendered_prompt}],
-                "temperature": 0.7,
-                "max_tokens": 3000,
-            }
-            data_resp, error = groq_request_with_rotation(
-                provider["url"], payload, provider["headers"].copy()
+            # Единый слой провайдеров: ротация ключей, cooldown, failover.
+            reply, error = chat_completion(
+                history + [{"role": "user", "content": rendered_prompt}],
+                system=config.system_prompt, temperature=0.7, max_tokens=3000, timeout=120,
             )
-            if error:
-                return jsonify({'error': error})
-            reply = data_resp["choices"][0]["message"]["content"]
+            if error or reply is None:
+                return jsonify({'error': str(error or "Модель не вернула ответ")})
             add_message(chat_id, "assistant", reply)
             return jsonify({'result': reply})
 
@@ -135,22 +128,13 @@ def handle_command():
         if not query:
             return jsonify({'error': 'Укажите, какой код создать'})
 
-        provider = PROVIDERS[config.current_provider]
-        payload = {
-            "model": config.current_model,
-            "messages": [
-                {"role": "system", "content": "Ты программист. Пиши чистый код с комментариями."},
-                {"role": "user", "content": f"Напиши код: {query}"}
-            ],
-            "temperature": 0.3,
-            "max_tokens": 3000,
-        }
-        data_resp, error = groq_request_with_rotation(
-            provider["url"], payload, provider["headers"].copy(), timeout=60
+        reply, error = chat_completion(
+            [{"role": "user", "content": f"Напиши код: {query}"}],
+            system="Ты программист. Пиши чистый код с комментариями.",
+            temperature=0.3, max_tokens=3000, timeout=60,
         )
-        if error:
-            return jsonify({'error': error})
-        reply = data_resp["choices"][0]["message"]["content"]
+        if error or reply is None:
+            return jsonify({'error': str(error or "Модель не вернула ответ")})
         return jsonify({'result': reply})
 
     # Управление алиасами
@@ -200,7 +184,6 @@ def handle_command():
         if not search_result:
             search_result = "Информация не найдена в интернете."
 
-        provider = PROVIDERS[config.current_provider]
         analysis_prompt = f"""Проанализируй следующую информацию и выдели 3-5 ключевых фактов по вопросу: "{query}"
 
 Информация из интернета:
@@ -208,19 +191,12 @@ def handle_command():
 
 Выдели только ключевые факты, коротко."""
 
-        analysis_payload = {
-            "model": config.current_model,
-            "messages": [{"role": "user", "content": analysis_prompt}],
-            "temperature": 0.3,
-            "max_tokens": 1000000,
-        }
-        data_analysis, error = groq_request_with_rotation(
-            provider["url"], analysis_payload, provider["headers"].copy(), timeout=60
+        analysis, error = chat_completion(
+            [{"role": "user", "content": analysis_prompt}],
+            temperature=0.3, max_tokens=8192, timeout=60,
         )
-        if error:
-            analysis = f"Анализ не удался: {error}.\n\nИспользую сырой поиск:\n{search_result[:1000]}"
-        else:
-            analysis = data_analysis["choices"][0]["message"]["content"]
+        if error or analysis is None:
+            analysis = f"Анализ не удался: {error}.\n\nИспользую сырой поиск:\n{search_result[:1000]}" 
 
         final_prompt = f"""На основе анализа напиши подробный, структурированный ответ на вопрос: "{query}"
 
@@ -240,19 +216,12 @@ def handle_command():
 | Скорость | 100 км/ч |
 | Вес | 10 кг |"""
 
-        final_payload = {
-            "model": config.current_model,
-            "messages": [{"role": "user", "content": final_prompt}],
-            "temperature": 0.5,
-            "max_tokens": 1000000,
-        }
-        data_final, error = groq_request_with_rotation(
-            provider["url"], final_payload, provider["headers"].copy(), timeout=90
+        final_answer, error = chat_completion(
+            [{"role": "user", "content": final_prompt}],
+            temperature=0.5, max_tokens=8192, timeout=90,
         )
-        if error:
-            final_answer = f"**🔍 Результаты поиска:**\n\n{search_result}\n\n**📊 Анализ:**\n\n{analysis}\n\n_(Финальный ответ не удалось сгенерировать: {error})_"
-        else:
-            final_answer = data_final["choices"][0]["message"]["content"]
+        if error or final_answer is None:
+            final_answer = f"**🔍 Результаты поиска:**\n\n{search_result}\n\n**📊 Анализ:**\n\n{analysis}\n\n_(Финальный ответ не удалось сгенерировать: {error})_" 
 
         return jsonify({'result': final_answer})
 
