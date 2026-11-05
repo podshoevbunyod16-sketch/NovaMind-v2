@@ -85,6 +85,38 @@ def search_backends():
     return [name.strip() for name in configured.split(",") if name.strip()]
 
 
+# ── Свежесть выдачи ──────────────────────────────────────────────────
+_MONTHS_RU = ("январь", "февраль", "март", "апрель", "май", "июнь", "июль",
+              "август", "сентябрь", "октябрь", "ноябрь", "декабрь")
+_FRESH_DAY = re.compile(r"сегодн|за\s+сутки|за\s+день|today|last\s+24", re.I)
+_FRESH_WEEK = re.compile(r"недел|week", re.I)
+_FRESH_MONTH = re.compile(r"месяц|month", re.I)
+_FRESH_ANY = re.compile(r"новост|свеж|последн|актуальн|сейчас|latest|news|recent|нов(?:ый|ая|ое|ые)\b", re.I)
+
+
+def search_time_filter(query):
+    """Код периода DuckDuckGo (df): d/w/m или None, если запрос не про свежее."""
+    text = str(query or "")
+    if _FRESH_DAY.search(text):
+        return "d"
+    if _FRESH_WEEK.search(text):
+        return "w"
+    if _FRESH_MONTH.search(text) or _FRESH_ANY.search(text):
+        return "m"
+    return None
+
+
+def freshen_search_query(query, today=None):
+    """Для запросов про свежее добавляет «месяц год», чтобы выдача не уходила в архив."""
+    import datetime as _dt
+    text = str(query or "").strip()
+    if not text or search_time_filter(text) is None or re.search(r"\b20\d\d\b", text):
+        return text
+    now = today or _dt.date.today()
+    return f"{text} {_MONTHS_RU[now.month - 1]} {now.year}"
+
+
+
 def normalize_search_query(query):
     """Исправляет частые опечатки, не отдавая смысл запроса модели."""
     value = (query or "").strip()
@@ -419,7 +451,7 @@ def search_web_searxng(query, num=8):
 def search_web_ddg(query, num=8):
     resp = requests.post(
         "https://html.duckduckgo.com/html/",
-        data={"q": query, "kl": "ru-ru"},
+        data={"q": query, "kl": "ru-ru", **({"df": _df} if (_df := search_time_filter(query)) else {})},
         headers=_HEADERS,
         timeout=SEARCH_TIMEOUT,
         allow_redirects=True,
@@ -432,7 +464,7 @@ def search_web_ddg(query, num=8):
 def search_web_ddg_lite(query, num=8):
     resp = requests.post(
         "https://lite.duckduckgo.com/lite/",
-        data={"q": query, "kl": "ru-ru"},
+        data={"q": query, "kl": "ru-ru", **({"df": _df} if (_df := search_time_filter(query)) else {})},
         headers=_HEADERS,
         timeout=SEARCH_TIMEOUT,
         allow_redirects=True,
@@ -451,6 +483,9 @@ def search_web_httpx_ddg(query, num=8):
     import time as _time
     url = "https://html.duckduckgo.com/html/"
     params = {"q": query, "kl": "ru-ru"}
+    _df = search_time_filter(query)
+    if _df:
+        params["df"] = _df
     last_error = "httpx/ДДГ: пустая выдача"
 
     for attempt in range(3):
@@ -739,6 +774,8 @@ def search_web(query, num=8, backends=None, on_progress=None):
     Возвращает (results, trace) — trace нужен для UI и диагностики.
     """
     query = normalize_search_query(query)
+    if not any(hint in query.lower() for hint in _WEATHER_HINTS):
+        query = freshen_search_query(query)
     selected_backends = list(backends or search_backends())
     if any(hint in query.lower() for hint in _WEATHER_HINTS) and "weather" not in selected_backends:
         selected_backends.insert(0, "weather")
