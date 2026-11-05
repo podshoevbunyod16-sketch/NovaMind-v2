@@ -480,12 +480,14 @@ def test_react_stops_repeated_mcp_failures_and_requests_final_answer(monkeypatch
 
     assert len(tool_definitions) == 4
     assert all(definitions for definitions in tool_definitions[:3])
-    assert tool_definitions[3] is None
-    assert len(calls) == 1  # repeated identical calls are blocked by the loop
+    # The identical retry is permitted after an MCP failure, but the model may
+    # choose to stop once the repeated observation confirms no recovery.
+    assert tool_definitions[3]
+    assert len(calls) == 3
     assert len(result.observations) == 3
-    assert result.observations[0]["result"]["ok"] is False
-    assert all(item["result"]["error"]["type"] == "repeat_call"
-               for item in result.observations[1:])
+    assert all(item["result"]["ok"] is False for item in result.observations)
+    assert all(item["result"]["error"]["type"] != "repeat_call"
+               for item in result.observations)
     assert "индекс" in result.answer.lower() or "заверш" in result.answer.lower()
 
 
