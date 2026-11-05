@@ -322,7 +322,6 @@ def _run(goal, record_id, *, chat_id="", history=None, observations=None,
     return response
 
 
-@react_bp.post("/api/agent/react")
 def _search_flag(payload) -> bool:
     """Кнопка «Автопоиск»: фронтенд шлёт ``search``, старые клиенты — ``auto_search``.
 
@@ -338,6 +337,7 @@ def _search_flag(payload) -> bool:
     return False
 
 
+@react_bp.post("/api/agent/react")
 def start_react_run(payload=None):
     from agent.runtime import is_enabled
     if not is_enabled():
