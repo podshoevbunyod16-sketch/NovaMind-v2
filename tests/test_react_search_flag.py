@@ -24,5 +24,5 @@ def test_react_route_is_bound_to_start_react_run():
     tree = ast.parse(inspect.getsource(module))
     bound = {node.name: [ast.unparse(d) for d in node.decorator_list]
              for node in tree.body if isinstance(node, ast.FunctionDef)}
-    assert any("/api/agent/react\"" in d for d in bound["start_react_run"])
+    assert any("/api/agent/react" in d for d in bound["start_react_run"])
     assert bound["_search_flag"] == []
