@@ -814,7 +814,8 @@ function createAssistantTurn(options = {}) {
         if (title) title.textContent = 'Работа в Linux';
       }
       const kind = event.kind || 'command';
-      const failed = event.status === 'error' || Number(event.code) !== 0;
+      const failed = event.status === 'error'
+        || (event.code != null && Number(event.code) !== 0);
       const label = event.label || TOOL_LABELS[event.name] || 'Выполнил шаг';
       const icon = event.icon || TOOL_ICONS[kind] || '•';
       const row = document.createElement('div');
