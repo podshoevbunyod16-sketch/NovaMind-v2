@@ -254,6 +254,12 @@ def run_react(ctx: AgentContext) -> AgentResult:
     knowledge_results: list[dict] = []
     workspace_revision = 0
     seen = set()
+    mcp_attempts: dict[str, int] = {}
+    mcp_succeeded: set[str] = set()
+    try:
+        repeat_limit = max(1, min(100, int(os.getenv("AGENT_TOOL_REPEAT_LIMIT", "10"))))
+    except (TypeError, ValueError):
+        repeat_limit = 10
     for item in observations:
         if not isinstance(item, dict) or not item.get("tool"):
             continue
@@ -262,12 +268,19 @@ def run_react(ctx: AgentContext) -> AgentResult:
                           workspace_revision if name == "shell" else 0],
                          sort_keys=True, ensure_ascii=False, separators=(",", ":"))
         seen.add(key)
+        if name == "mcp_call":
+            mcp_attempts[key] = mcp_attempts.get(key, 0) + 1
+            result = item.get("result") if isinstance(item.get("result"), dict) else {}
+            if result.get("ok") is True:
+                mcp_succeeded.add(key)
         if (name in {"file_write", "file_edit", "file_delete"}
                 and isinstance(item.get("result"), dict) and item["result"].get("ok")):
             workspace_revision += 1
 
     token_budget = max(256, int(ctx.max_tokens))
-    forced_search = bool(ctx.search_requested and "web_search" in by_name and not observations)
+    forced_search = bool(ctx.search_requested and "web_search" in by_name and not observations
+                         and not re.search(r"(?:терминал|команд\w*|shell|bash|linux)",
+                                           str(ctx.goal or ""), re.I))
     if forced_search:
         query = re.sub(r"[?!.]+$", "", str(ctx.goal or "")).strip()
         offline_action = {"tool": "web_search", "arguments": {"query": query, "limit": 10}}
@@ -465,6 +478,7 @@ def run_react(ctx: AgentContext) -> AgentResult:
                 status = "cancelled"
                 break
             name = call.get("tool", "")
+            _tool_started = ctx.clock()
             args = call.get("arguments")
             if not isinstance(args, dict):
                 args = {}
@@ -518,11 +532,26 @@ def run_react(ctx: AgentContext) -> AgentResult:
             else:
                 key = json.dumps([name, args, workspace_revision if name == "shell" else 0],
                                  sort_keys=True, ensure_ascii=False, separators=(",", ":"))
-                if key in seen and call_index not in parallel_results:
-                    event = {"ok": False, "error": {"type": "repeat_call", "message": "Одинаковый вызов уже выполнялся без новых данных. Смените стратегию и используйте наблюдения."}}
+                repeated = key in seen and call_index not in parallel_results
+                retry_mcp = (name == "mcp_call" and repeated
+                             and key not in mcp_succeeded
+                             and mcp_attempts.get(key, 0) < repeat_limit)
+                if repeated and not retry_mcp and call_index not in parallel_results:
+                    reason = (f"Достигнут лимит повторов MCP ({repeat_limit}); вызов не выполнялся."
+                              if name == "mcp_call" else
+                              "Одинаковый вызов уже выполнялся без новых данных; повтор заблокирован.")
+                    event = {"ok": False, "error": {"type": "repeat_call", "message": reason}}
+                    if name == "mcp_call":
+                        force_final_response = True
+                    messages.append({"role": "user", "content": (
+                        "Этот вызов инструмента не выполнялся. Не представляй его как результат. "
+                        "Используй только наблюдения реально выполненных вызовов. Если данных нет, "
+                        "сообщи об этом прямо и не выдумывай их.")})
                 else:
                     if call_index not in parallel_results:
                         seen.add(key)
+                        if name == "mcp_call":
+                            mcp_attempts[key] = mcp_attempts.get(key, 0) + 1
                     if name == "mcp_call":
                         # Resolve human-friendly server labels against the unified
                         # MCP Manager; transport-specific quirks stay out of ReAct.
@@ -543,6 +572,7 @@ def run_react(ctx: AgentContext) -> AgentResult:
                     event = parallel_results.pop(call_index, None)
                     if event is None:
                         event = _call(ctx, name, args, spec)
+            _tool_elapsed_ms = max(0, round((ctx.clock() - _tool_started) * 1000))
             import guardrails
             serialized = json.dumps({"arguments": args, "result": event},
                                     ensure_ascii=False, default=str)
@@ -593,6 +623,7 @@ def run_react(ctx: AgentContext) -> AgentResult:
                              {"role": "user", "content": f"Наблюдение инструмента {name}: {trusted_boundary}"}])
             tool_event = {"type": "tool", "name": name,
                           "status": "ok" if event.get("ok", False) else "error",
+                          "elapsed_ms": _tool_elapsed_ms,
                           "risk": risk,
                           "authorized": not confirmation_required or approval_key in approvals,
                           "command": json.dumps(args, ensure_ascii=False), "output": clean,
@@ -612,7 +643,22 @@ def run_react(ctx: AgentContext) -> AgentResult:
                 tool_event["output"] = "Веб-поиск не удался: " + str(error.get("message") or clean)[:1000]
             ctx.emit(tool_event)
             tool_failed = (event.get("ok") is False or bool(event.get("error")))
-            record_tool_outcome(tool_failed)
+            if name != "mcp_call":
+                record_tool_outcome(tool_failed)
+            elif event.get("ok") is True:
+                completed_key = json.dumps([name, args, 0], sort_keys=True,
+                                           ensure_ascii=False, separators=(",", ":"))
+                mcp_succeeded.add(completed_key)
+            if name == "mcp_call":
+                mcp_result = event.get("result") if isinstance(event.get("result"), dict) else {}
+                mcp_empty = (event.get("ok") is True and not mcp_result)
+                if tool_failed or mcp_empty:
+                    reason = "ошибка" if tool_failed else "пустой результат"
+                    messages.append({"role": "user", "content": (
+                        f"MCP-инструмент вернул {reason}. Не представляй неподтверждённые данные "
+                        "как результат. Сам оцени по аргументам и наблюдениям, исправить ли вызов "
+                        "или повторить его (в пределах лимита), либо сообщить об ограничении. "
+                        "При любом ответе не выдумывай результат инструмента.")})
             if force_final_response:
                 break
             if name in {"web_search", "search"} and isinstance(event.get("results"), list):

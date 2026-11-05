@@ -827,7 +827,7 @@ function createAssistantTurn(options = {}) {
         <span class="agent-term-ico" aria-hidden="true">${icon}</span>
         <span class="agent-term-label">${escapeHtml(label)}</span>
         <code class="agent-term-cmd">${escapeHtml(detail)}</code>
-        <span class="agent-term-code">${escapeHtml(String(event.code ?? 0))}</span>`;
+        <span class="agent-term-code">${event.elapsed_ms != null ? escapeHtml((Number(event.elapsed_ms) / 1000).toFixed(2) + ' с') : escapeHtml(String(event.code ?? 0))}</span>`;
       const rawOutput = String(event.error || event.output || '');
       if (rawOutput) {
         const cleanOutput = failed

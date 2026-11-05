@@ -80,9 +80,14 @@ def _run(goal, record_id, *, chat_id="", history=None, observations=None,
                 "Подключённые MCP-серверы и обнаруженные инструменты: "
                 + json.dumps({"servers": servers, "tools": tool_catalog}, ensure_ascii=False,
                              separators=(",", ":"))
-                + "\nЕсли нужного инструмента нет в списке или контекст обрезан, вызови mcp_list с server_id; "
+                + "\nВыбирай инструмент по смыслу цели пользователя и описанию его возможностей, а не по совпадению "
+                "ключевых слов, примерам прошлых запросов или только по имени. Сопоставляй синонимы и "
+                "подразумеваемое действие с описанием и inputSchema; если инструмент подходит — вызови его "
+                "с аргументами, выведенными из запроса. Не вызывай search_mcp_servers лишь потому, что "
+                "пользователь просит выполнить поиск или действие: сначала проверь подключённый каталог. "
+                "Если подходящего инструмента нет в списке или контекст обрезан, вызови mcp_list с server_id; "
                 "для большого каталога продолжай по next_offset. Выполняй только требуемое действие, "
-                "проверяй isError/ошибку и не объявляй задачу успешной без полноценного итогового ответа."
+                "проверяй isError/ошибку и не объявляй задачу успешной без подтверждающего результата."
             )
     except Exception:
         current_app.logger.warning("Не удалось перечислить MCP-инструменты", exc_info=True)
@@ -377,7 +382,14 @@ def start_react_run(payload=None):
                             "scope": scope})
         response.headers["Retry-After"] = str(retry_after)
         return response, 429
-    prior = database.get_chat_history(chat_id, limit=30)
+    try:
+        session_history_limit = max(20, min(1000, int(os.getenv("AGENT_SESSION_HISTORY_LIMIT", "200"))))
+    except (TypeError, ValueError):
+        session_history_limit = 200
+    # Retrieve the current chat's prior turns before appending this request.
+    # The chat_id is the session boundary: no messages from other chats/users
+    # are mixed into this agent context.
+    prior = database.get_chat_history(chat_id, limit=session_history_limit)
     database.add_message(chat_id, "user", goal)
     workspace = (parse_bool(payload.get("workspace"), default=False)
                  and str(os.getenv("TERMINAL_ENABLED", "0")) == "1"
