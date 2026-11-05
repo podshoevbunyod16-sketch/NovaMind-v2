@@ -67,6 +67,7 @@ def _run(goal, record_id, *, chat_id="", history=None, observations=None,
     role = "admin" if is_admin else ("user" if owner.startswith("email:") else "guest")
     memory_context = ""
     integration_context = ""
+    tool_catalog = []
     try:
         if role == "admin" or str(os.getenv("MCP_ALLOW_USER_READ", "0")) == "1":
             import mcp_manager
@@ -234,7 +235,8 @@ def _run(goal, record_id, *, chat_id="", history=None, observations=None,
         workspace=bool(workspace), run_id=current_run_id, resume=resume,
         cancel=cancel, approvals=list(approvals or []), tools=specs,
         memory_context=memory_context, integration_context=integration_context,
-        skill_context=skill_context, search_requested=bool(search_requested),
+        mcp_tools=tool_catalog, skill_context=skill_context,
+        search_requested=bool(search_requested),
         max_steps=int(os.getenv("AGENT_MAX_STEPS", "20")),
         timeout=float(os.getenv("AGENT_TIMEOUT", "240")),
         max_tokens=max_tokens,

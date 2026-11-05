@@ -449,7 +449,8 @@ def test_mcp_failure_cannot_become_an_unverified_success_claim(monkeypatch, tmp_
     result = run_react(AgentContext(goal="проверь данные в MCP", complete=complete, tools=[spec],
                                     call_tool=failed_call, max_steps=4, timeout=4))
     assert result.observations[0]["result"]["ok"] is False
-    assert result.answer.startswith("Не могу честно подтвердить завершение задачи")
+    assert result.answer.startswith("Не удалось получить подтверждённый результат от MCP")
+    assert "MCP HTTP 503" in result.answer
 
 
 def test_react_stops_repeated_mcp_failures_and_requests_final_answer(monkeypatch, tmp_path):
@@ -488,7 +489,8 @@ def test_react_stops_repeated_mcp_failures_and_requests_final_answer(monkeypatch
     assert all(item["result"]["ok"] is False for item in result.observations)
     assert all(item["result"]["error"]["type"] != "repeat_call"
                for item in result.observations)
-    assert "индекс" in result.answer.lower() or "заверш" in result.answer.lower()
+    assert "Repository not indexed" in result.answer
+    assert "не подтверждён" in result.answer
 
 
 def test_settings_tools_endpoint_requires_admin_before_stdio_discovery(client, sandbox, monkeypatch):
