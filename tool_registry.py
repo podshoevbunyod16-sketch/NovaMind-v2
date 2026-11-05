@@ -97,10 +97,11 @@ def tool_schemas(workspace: bool | None = None) -> list[dict]:
                     "type": "object",
                     "properties": {
                         "server_id": {"type": "string"},
-                        "tool": {"type": "string"},
+                        "tool": {"type": "string", "description": "Имя MCP-инструмента (алиас tool_name)"},
+                        "tool_name": {"type": "string", "description": "Имя MCP-инструмента"},
                         "arguments": {"type": "object"},
                     },
-                    "required": ["server_id", "tool"],
+                    "required": ["server_id"],
                 },
                 "permissions": ["network", "external_service"],
                 "timeout": 30,
@@ -547,11 +548,12 @@ def _register_agent_tools():
     в нативном режиме о них не знала.
     """
     if get_tool("mcp_call") is None:
-        def mcp_call(server_id, tool, arguments=None):
+        def mcp_call(server_id, tool=None, arguments=None, tool_name=None):
             import identity
             import mcp_registry
             import mcp_manager
-            server_id, tool = str(server_id or "").strip(), str(tool or "").strip()
+            server_id = str(server_id or "").strip()
+            tool = str(tool or tool_name or "").strip()
             if not server_id or not tool:
                 return {"ok": False, "error": {"type": "bad_arguments",
                                                "message": "нужны server_id и tool",
@@ -584,8 +586,9 @@ def _register_agent_tools():
             {"type": "object",
              "properties": {"server_id": {"type": "string"},
                             "tool": {"type": "string"},
+                            "tool_name": {"type": "string"},
                             "arguments": {"type": "object"}},
-             "required": ["server_id", "tool"]},
+             "required": ["server_id"]},
             mcp_call, permissions=("network", "external_service"), timeout=30,
             risk="danger"))
 
