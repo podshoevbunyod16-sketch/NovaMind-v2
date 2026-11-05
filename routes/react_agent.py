@@ -323,6 +323,21 @@ def _run(goal, record_id, *, chat_id="", history=None, observations=None,
 
 
 @react_bp.post("/api/agent/react")
+def _search_flag(payload) -> bool:
+    """Кнопка «Автопоиск»: фронтенд шлёт ``search``, старые клиенты — ``auto_search``.
+
+    Раньше читался только ``auto_search``, поэтому принудительный веб-поиск
+    не запускался никогда, и модель отвечала «из памяти».
+    """
+    from agent.runtime import parse_bool
+    if not isinstance(payload, dict):
+        return False
+    for key in ("search", "auto_search"):
+        if key in payload:
+            return parse_bool(payload[key], default=False)
+    return False
+
+
 def start_react_run(payload=None):
     from agent.runtime import is_enabled
     if not is_enabled():
@@ -382,7 +397,7 @@ def start_react_run(payload=None):
                 history=prior, workspace=workspace, run_id=run_id,
                 tools_enabled=request_tools_allowed(payload), cancel=cancel,
                 rate_limit=limit, rate_remaining=remaining, rate_scope=scope,
-                search_requested=parse_bool(payload.get("auto_search"), default=False))
+                search_requested=_search_flag(payload))
 
 
 @react_bp.post("/api/agent/react/stop")
