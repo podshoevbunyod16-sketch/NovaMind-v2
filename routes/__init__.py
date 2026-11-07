@@ -19,11 +19,14 @@ from .workspace import workspace_bp
 from .react_agent import react_bp
 from .github_agent import github_agent_bp
 
+from routes.platform import platform_bp
+
 ALL_BLUEPRINTS = [
     chat_bp,
     commands_bp,
     settings_bp,
     admin_bp,
+    platform_bp,
     media_bp,
     search_bp,
     composio_bp,
