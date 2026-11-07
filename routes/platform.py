@@ -28,7 +28,8 @@ def platform_run():
     if not hmac.compare_digest(auth, f"Bearer {PLATFORM_TOKEN}"):
         return jsonify({"error": "unauthorized"}), 401
     data = request.get_json(silent=True) or {}
-    text = str(data.get("text", "")).strip()
+    inner = data.get("input") if isinstance(data.get("input"), dict) else data
+    text = str(inner.get("text", "")).strip()
     if not text:
         return jsonify({"error": "text is required"}), 400
     try:
