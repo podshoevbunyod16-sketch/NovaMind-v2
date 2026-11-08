@@ -86,6 +86,25 @@ def static_files(filename):
 def index():
     return redirect('/chat')
 
+# ---------- Внешний HTTP-агент для платформы Agent-Civilization ----------
+AGENT_TOKEN = os.getenv("AGENT_TOKEN", "")
+
+@app.route("/run", methods=["POST"])
+def agent_run():
+    from flask import request, jsonify
+    if AGENT_TOKEN and request.headers.get("X-Agent-Token") != AGENT_TOKEN:
+        return jsonify({"error": "forbidden"}), 403
+    body = request.get_json(silent=True) or {}
+    payload = body.get("input") or body
+    text = str(payload.get("text", "")).strip()
+    if not text:
+        return jsonify({"output": {"error": "empty text"}}), 400
+    from ai_providers import chat_completion
+    answer, meta = chat_completion([{"role": "user", "content": text}], max_tokens=800)
+    if answer is None:
+        return jsonify({"output": {"error": str(meta)[:300]}}), 502
+    return jsonify({"output": {"answer": answer, "source": "novamind-v2"}})
+
 # ========== ЗАПУСК ==========
 if __name__ == '__main__':
     port = PORT
