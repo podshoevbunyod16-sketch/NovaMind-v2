@@ -374,7 +374,7 @@ def has_credentials(provider: str) -> bool:
 # LM Studio). Выключено по умолчанию: без него первый запрос не тратит
 # время на сетевой пробинг. LOCAL_LLM_AUTODETECT=1 — и чат сам подхватит
 # запущенный локальный сервер, если облачных ключей нет.
-LOCAL_LLM_AUTODETECT = os.getenv("LOCAL_LLM_AUTODETECT", "0") == "1"
+LOCAL_LLM_AUTODETECT = os.getenv("LOCAL_LLM_AUTODETECT", "1") == "1"
 _LOCAL_PROBE = {"at": 0.0, "ok": False}
 _LOCAL_PROBE_TTL = 60.0
 

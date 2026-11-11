@@ -499,10 +499,11 @@ def default_manager():
     if pollinations:
         manager.register_provider("pollinations", keys=pollinations, models=[])
 
-    oai = _env_keys("OPENAI_COMPATIBLE_KEY", "OPENAI_API_KEY")
-    if oai:
-        manager.register_provider("openai_compatible", keys=oai,
-                                  models=[os.getenv("LOCAL_MODEL_ID", "local-llama")])
+    # Локальный llama-server / Ollama обычно работает без ключа: регистрируем
+    # провайдер всегда, с заглушкой "ollama", иначе чат его не видит.
+    oai = _env_keys("OPENAI_COMPATIBLE_KEY", "OPENAI_API_KEY") or ["ollama"]
+    manager.register_provider("openai_compatible", keys=oai,
+                              models=[os.getenv("LOCAL_MODEL_ID", "local-llama")])
 
     return manager
 
