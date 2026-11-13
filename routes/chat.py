@@ -173,6 +173,35 @@ def _media_stream_response(model, prompt, confirm, options, chat_id):
     )
 
 
+def _issue_chat_receipt(kind, chat_id, provider, model, prompt, output,
+                        tools=None, sources=None, usage=None, meta=None):
+    """Квитанция хода чата. Никогда не мешает ответу: ошибки только в лог."""
+    try:
+        import receipts
+        return receipts.issue_safe(
+            kind=kind, chat_id=chat_id, provider=provider, model=model,
+            prompt=prompt, output=output, tools=tools or [], sources=sources or [],
+            usage=usage or {}, meta=meta or {})
+    except Exception:  # noqa: BLE001 — квитанция не должна ломать чат
+        logging.getLogger("novamind.chat").warning("Квитанция чата не создана",
+                                                   exc_info=True)
+        return {}
+
+
+def _estimate_usage(provider, model, prompt, output):
+    """Оценка токенов и цены для квитанции (провайдер не всегда отдаёт usage)."""
+    try:
+        import usage_stats
+        prompt_tokens = usage_stats.estimate_tokens(prompt)
+        completion_tokens = usage_stats.estimate_tokens(output)
+        cost = usage_stats.cost_of(provider, model, prompt_tokens, completion_tokens)
+        return {"total_tokens": prompt_tokens + completion_tokens,
+                "cost_usd": cost or 0.0, "estimated": True,
+                "cost_known": cost is not None}
+    except Exception:  # noqa: BLE001 — оценка необязательна
+        return {}
+
+
 @chat_bp.route('/send', methods=['POST'])
 def send():
     """Отправка сообщения к ИИ с сохранением в БД"""
@@ -236,7 +265,11 @@ def send():
         add_message(chat_id, "assistant", reply)
         trim_messages(chat_id, max_messages=100)
         contents = get_chat_history(chat_id, limit=20)
-        return jsonify({'reply': reply, 'chat_id': chat_id, 'mcp': True})
+        receipt = _issue_chat_receipt(
+            "chat", chat_id, provider, model_name, message, reply,
+            tools=["mcp"], usage=_estimate_usage(provider, model_name, message, reply))
+        return jsonify({'reply': reply, 'chat_id': chat_id, 'mcp': True,
+                        'receipt': receipt})
 
     # Единый слой провайдеров: сам выбирает рабочий транспорт
     # (Groq / Gemini / OpenRouter / локальный llama-server / офлайн-модель).
@@ -264,7 +297,10 @@ def send():
     # Совместимость: обновляем contents для других endpoint'ов
     contents = get_chat_history(chat_id, limit=20)
 
-    return jsonify({'reply': reply, 'chat_id': chat_id})
+    receipt = _issue_chat_receipt(
+        "chat", chat_id, provider, model_name, message, reply,
+        usage=_estimate_usage(provider, model_name, message, reply))
+    return jsonify({'reply': reply, 'chat_id': chat_id, 'receipt': receipt})
 
 
 @chat_bp.route('/send_stream', methods=['POST'])
@@ -348,10 +384,13 @@ def send_stream():
                 contents.append({"role": "assistant", "content": full_reply})
                 if len(contents) > 20:
                     del contents[:-20]
+                receipt = _issue_chat_receipt(
+                    "chat", _chat_id_stream, provider, model, message, full_reply,
+                    tools=["mcp"], usage=_estimate_usage(provider, model, message, full_reply))
                 yield emit({"done": True, "model": model, "provider": provider,
                             "offline": provider == "local_demo", "has_reply": True,
                             "mcp": True, "reasoning_chars": 0,
-                            "chat_id": _chat_id_stream})
+                            "chat_id": _chat_id_stream, "receipt": receipt})
                 return
 
             for kind, chunk in chat_stream(
@@ -405,6 +444,11 @@ def send_stream():
                 if len(contents) > 20:
                     del contents[:-20]
 
+            receipt = (_issue_chat_receipt(
+                "chat", _chat_id_stream, provider, model, message, full_reply,
+                usage=_estimate_usage(provider, model, message, full_reply),
+                meta={"reasoning_chars": len(reasoning_text)})
+                if full_reply else {})
             yield emit({
                 "done": True,
                 "model": model,
@@ -413,6 +457,7 @@ def send_stream():
                 "has_reply": bool(full_reply),
                 "reasoning_chars": len(reasoning_text),
                 "chat_id": _chat_id_stream,
+                "receipt": receipt,
             })
         except GeneratorExit:
             raise

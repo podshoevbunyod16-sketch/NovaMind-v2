@@ -213,6 +213,24 @@ def _run(goal, record_id, *, chat_id="", history=None, observations=None,
                         events.put({"type": "usage", "usage": usage})
                     except Exception:
                         current_app.logger.warning("Не удалось записать токены ReAct", exc_info=True)
+                if str(event.get("reply") or "").strip():
+                    try:
+                        import receipts
+                        event["receipt"] = receipts.issue_safe(
+                            kind="agent", chat_id=chat_id, run_id=current_run_id,
+                            provider=chosen_provider, model=chosen_model,
+                            prompt=goal, output=str(event.get("reply") or ""),
+                            tools=sorted(capability.tools),
+                            sources=sources_results, usage=event.get("usage") or {},
+                            prompt_versions=prompt_versions,
+                            meta={"status": event.get("status"),
+                                  "steps": len(trace_events),
+                                  "searched": sources_found,
+                                  "workspace": workspace_used},
+                        )
+                    except Exception:
+                        current_app.logger.warning("Не удалось создать квитанцию агента",
+                                                   exc_info=True)
             if event.get("type") == "media" and chat_id:
                 media_payload = event.get("media") if isinstance(event.get("media"), dict) else {}
                 try:

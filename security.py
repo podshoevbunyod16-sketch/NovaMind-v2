@@ -134,9 +134,18 @@ class TTSRateLimiter(RateLimiter):
         return _env_int("TTS_RATE_WINDOW", 3600)
 
 
+class CouncilRateLimiter(RateLimiter):
+    """Отдельный лимит на «Совет моделей»: один вопрос = несколько запросов."""
+
+    def limit_for(self, signed_in: bool) -> int:
+        return _env_int("COUNCIL_RATE_USER" if signed_in else "COUNCIL_RATE_GUEST",
+                        60 if signed_in else 10)
+
+
 login_limiter = LoginLimiter()
 agent_limiter = RateLimiter()
 tts_limiter = TTSRateLimiter()
+council_limiter = CouncilRateLimiter()
 
 # Внутренние запуски агента (планировщик, Telegram-бот) идут в том же
 # процессе и не должны съедать лимит пользователя. Отличаем их секретным
@@ -176,3 +185,17 @@ def agent_rate_check(request, signed_in: bool, key_suffix: str = ""):
     scope = f"user:{key_suffix}" if signed_in and key_suffix else f"ip:{client_ip(request)}"
     allowed, retry_after, remaining = agent_limiter.hit(scope, limit, window)
     return allowed, retry_after, limit, remaining, scope
+
+
+def council_rate_check(request, signed_in: bool, key_suffix: str = ""):
+    """Лимит «Совета моделей». Возвращает (allowed, retry_after, limit, remaining)."""
+    if os.getenv("COUNCIL_RATE_LIMIT", "1") != "1":
+        return True, 0, 0, 0
+    limit = council_limiter.limit_for(signed_in)
+    window = council_limiter.window()
+    if limit <= 0:
+        return True, 0, 0, 0
+    scope = (f"council:user:{key_suffix}" if signed_in and key_suffix
+             else f"council:ip:{client_ip(request)}")
+    allowed, retry_after, remaining = council_limiter.hit(scope, limit, window)
+    return allowed, retry_after, limit, remaining

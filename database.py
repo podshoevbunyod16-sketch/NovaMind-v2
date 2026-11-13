@@ -12,7 +12,8 @@ from flask import session
 
 import identity as _identity
 
-DB_PATH = os.path.join(os.path.dirname(__file__), "novamind_chats.db")
+# Путь к базе можно вынести на отдельный том (Docker/Render).
+DB_PATH = os.getenv("NOVA_DB_PATH") or os.path.join(os.path.dirname(__file__), "novamind_chats.db")
 _db_lock = threading.Lock()
 
 def get_db():

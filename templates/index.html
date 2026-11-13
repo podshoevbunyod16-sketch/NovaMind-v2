@@ -9,6 +9,7 @@
   <link rel="stylesheet" href="/static/style.css?v=speech1">
   <link rel="stylesheet" href="/static/workspace.css">
   <link rel="stylesheet" href="/static/agent-controls.css">
+  <link rel="stylesheet" href="/static/signature.css">
 </head>
 <body>
 
@@ -69,6 +70,12 @@
       <div class="nav-item" onclick="openMemory(); closeSidebar();" role="button" tabindex="0">
         <span style="font-size:16px;">🧠</span>
         Память
+      </div>
+
+      <div class="nav-item" onclick="window.location.href='/trust'" role="button" tabindex="0">
+        <span style="font-size:16px;">🧾</span>
+        Доверие
+        <span class="nav-badge">New</span>
       </div>
 
       <div class="nav-label">Сервисы</div>
@@ -301,6 +308,7 @@
 
   <script src="/static/i18n.js?v=lang4"></script>
   <script src="/static/tts.js?v=speech2"></script>
+  <script src="/static/signature.js"></script>
   <script src="/static/app.js?v=chatmem1"></script>
   <script src="/static/linux.js?v=chatmem1"></script>
   <script src="/static/memory.js"></script>

@@ -1,0 +1,259 @@
+/* ═══════════════════════════════════════════════════════════════════
+   NovaMind · SIGNATURE UI — квитанции и совет моделей
+   ───────────────────────────────────────────────────────────────────
+   Один файл на две фирменные функции:
+     • Nova Receipts  — бейдж и модальное окно квитанции;
+     • Nova Council   — модальное окно «Совета моделей» с картой согласия.
+   Стили опираются на токены liquid-glass.css и работают в любой теме.
+   ═══════════════════════════════════════════════════════════════════ */
+
+/* ── 1. ОБЩЕЕ МОДАЛЬНОЕ ОКНО ───────────────────────────────────── */
+.sig-overlay {
+  position: fixed; inset: 0; z-index: 9000;
+  display: grid; place-items: center;
+  padding: 24px;
+  background: rgba(4, 6, 18, .58);
+  backdrop-filter: blur(14px) saturate(140%);
+  -webkit-backdrop-filter: blur(14px) saturate(140%);
+  animation: sig-fade .22s var(--ease) both;
+}
+.sig-overlay[hidden] { display: none; }
+@keyframes sig-fade { from { opacity: 0; } to { opacity: 1; } }
+
+.sig-modal {
+  position: relative;
+  width: min(760px, 100%);
+  max-height: min(86vh, 900px);
+  overflow: auto;
+  padding: 22px 22px 18px;
+  border-radius: var(--r-lg);
+  background:
+    linear-gradient(160deg, rgba(255,255,255,.10), rgba(255,255,255,.02) 42%),
+    color-mix(in srgb, var(--bg-1) 82%, transparent);
+  border: 1px solid var(--glass-border);
+  box-shadow: var(--glass-shadow-lg);
+  animation: sig-pop .28s var(--ease-out) both;
+  scrollbar-width: thin;
+}
+@keyframes sig-pop {
+  from { opacity: 0; transform: translateY(14px) scale(.97); }
+  to   { opacity: 1; transform: translateY(0) scale(1); }
+}
+.sig-modal.sig-wide { width: min(980px, 100%); }
+
+.sig-head {
+  display: flex; align-items: center; gap: 12px;
+  margin-bottom: 14px;
+}
+.sig-head h2 {
+  margin: 0; font-size: 18px; font-weight: 650; letter-spacing: -.2px;
+  display: flex; align-items: center; gap: 8px;
+}
+.sig-head .sig-sub { color: var(--text-3); font-size: 12.5px; }
+.sig-close {
+  margin-left: auto;
+  width: 34px; height: 34px; border-radius: 50%;
+  border: 1px solid var(--glass-border-soft);
+  background: var(--glass-fill);
+  color: var(--text-2); font-size: 16px; line-height: 1;
+  cursor: pointer; transition: var(--t-fast) var(--ease);
+}
+.sig-close:hover { background: var(--glass-fill-2); color: var(--text-1); }
+
+.sig-grid { display: grid; gap: 10px; }
+.sig-grid.two { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+@media (max-width: 680px) { .sig-grid.two { grid-template-columns: 1fr; } }
+
+.sig-row {
+  display: flex; justify-content: space-between; gap: 12px;
+  padding: 9px 12px; border-radius: var(--r-xs);
+  background: var(--glass-fill);
+  border: 1px solid var(--glass-border-soft);
+  font-size: 12.5px;
+}
+.sig-row .k { color: var(--text-3); }
+.sig-row .v { color: var(--text-1); text-align: right; word-break: break-word; }
+.sig-mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11.5px; letter-spacing: -.1px;
+}
+
+.sig-note {
+  margin: 12px 0 0; padding: 10px 12px;
+  border-radius: var(--r-xs);
+  border: 1px dashed var(--glass-border-soft);
+  color: var(--text-3); font-size: 12px; line-height: 1.5;
+}
+
+/* ── 2. КВИТАНЦИЯ ──────────────────────────────────────────────── */
+.receipt-anchor {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 3px 9px; margin-left: 6px;
+  border-radius: var(--r-pill);
+  border: 1px solid color-mix(in srgb, var(--ok) 32%, transparent);
+  background: color-mix(in srgb, var(--ok) 12%, transparent);
+  color: var(--ok); font-size: 11.5px;
+  cursor: pointer; transition: var(--t-fast) var(--ease);
+  vertical-align: middle;
+}
+.receipt-anchor:hover { background: color-mix(in srgb, var(--ok) 20%, transparent); }
+.receipt-anchor[data-state="bad"] {
+  border-color: color-mix(in srgb, var(--err) 40%, transparent);
+  background: color-mix(in srgb, var(--err) 14%, transparent);
+  color: var(--err);
+}
+
+.chain-visual {
+  display: flex; flex-direction: column; gap: 0;
+  margin: 12px 0; padding: 14px;
+  border-radius: var(--r-sm);
+  background: linear-gradient(180deg, var(--glass-fill), transparent);
+  border: 1px solid var(--glass-border-soft);
+}
+.chain-node {
+  position: relative; padding: 8px 0 8px 22px;
+  font-size: 12px; color: var(--text-2);
+}
+.chain-node::before {
+  content: ""; position: absolute; left: 5px; top: 50%;
+  width: 8px; height: 8px; margin-top: -4px; border-radius: 50%;
+  background: var(--ok); box-shadow: 0 0 10px color-mix(in srgb, var(--ok) 70%, transparent);
+}
+.chain-node + .chain-node::after {
+  content: ""; position: absolute; left: 8.5px; top: -50%;
+  width: 1px; height: 100%;
+  background: linear-gradient(var(--glass-border), color-mix(in srgb, var(--ok) 50%, transparent));
+}
+.chain-node .hash {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px; color: var(--text-3); word-break: break-all;
+}
+.chain-node strong { color: var(--text-1); font-weight: 600; }
+
+/* ── 3. СОВЕТ МОДЕЛЕЙ ──────────────────────────────────────────── */
+.council-verdict {
+  display: flex; align-items: center; gap: 16px;
+  padding: 14px 16px; margin-bottom: 14px;
+  border-radius: var(--r-md);
+  background: linear-gradient(120deg, var(--accent-soft), transparent 70%);
+  border: 1px solid color-mix(in srgb, var(--accent) 26%, transparent);
+}
+.agreement-ring {
+  --value: 0;
+  position: relative; flex: 0 0 auto;
+  width: 78px; height: 78px; border-radius: 50%;
+  background:
+    conic-gradient(var(--accent) calc(var(--value) * 1%),
+                   color-mix(in srgb, var(--glass-fill) 200%, transparent) 0);
+  display: grid; place-items: center;
+  box-shadow: inset 0 0 0 1px var(--glass-border-soft);
+}
+.agreement-ring::after {
+  content: ""; position: absolute; inset: 8px; border-radius: 50%;
+  background: color-mix(in srgb, var(--bg-1) 88%, transparent);
+}
+.agreement-ring span {
+  position: relative; z-index: 1;
+  font-size: 19px; font-weight: 700; letter-spacing: -.5px;
+}
+.council-verdict-txt { min-width: 0; }
+.council-verdict-txt h3 { margin: 0 0 4px; font-size: 15px; font-weight: 650; }
+.council-verdict-txt p { margin: 0; color: var(--text-3); font-size: 12.5px; line-height: 1.5; }
+
+.council-section-title {
+  margin: 18px 0 8px; font-size: 11px; letter-spacing: .12em;
+  text-transform: uppercase; color: var(--text-3);
+}
+.council-points { margin: 0; padding: 0; list-style: none; display: grid; gap: 6px; }
+.council-points li {
+  position: relative; padding: 8px 10px 8px 28px;
+  border-radius: var(--r-xs);
+  background: var(--glass-fill);
+  border: 1px solid var(--glass-border-soft);
+  font-size: 12.5px; line-height: 1.5; color: var(--text-2);
+}
+.council-points li::before {
+  content: "✓"; position: absolute; left: 10px; top: 7px;
+  color: var(--ok); font-size: 12px;
+}
+.council-points.disagree li::before { content: "≠"; color: var(--warn); }
+.council-points li .who {
+  display: block; margin-top: 4px; font-size: 11px; color: var(--text-4);
+}
+
+.council-seats { display: grid; gap: 10px; }
+.council-seat {
+  border-radius: var(--r-sm);
+  border: 1px solid var(--glass-border-soft);
+  background: color-mix(in srgb, var(--bg-1) 55%, transparent);
+  overflow: hidden;
+}
+.council-seat > summary {
+  display: flex; align-items: center; gap: 10px;
+  padding: 11px 13px; cursor: pointer; list-style: none;
+  font-size: 13px; color: var(--text-1);
+}
+.council-seat > summary::-webkit-details-marker { display: none; }
+.council-seat .seat-ico { font-size: 16px; }
+.council-seat .seat-lens { font-weight: 600; }
+.council-seat .seat-model {
+  margin-left: auto; font-size: 11px; color: var(--text-4);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  max-width: 45%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.council-seat .seat-body {
+  padding: 0 14px 13px; font-size: 13px; line-height: 1.6; color: var(--text-2);
+  white-space: pre-wrap;
+}
+.council-seat[data-status="error"] { border-color: color-mix(in srgb, var(--err) 34%, transparent); }
+.council-seat[data-status="error"] .seat-body { color: var(--err); }
+.council-seat[data-status="ok"] .seat-lens::after {
+  content: "✓"; margin-left: 6px; color: var(--ok); font-size: 11px;
+}
+.council-seat[data-status="error"] .seat-lens::after {
+  content: "выбыл"; margin-left: 6px; color: var(--err); font-size: 10.5px;
+  text-transform: lowercase;
+}
+
+.council-loading { display: grid; gap: 10px; padding: 6px 0 12px; }
+.council-skeleton {
+  height: 54px; border-radius: var(--r-sm);
+  background: linear-gradient(90deg, var(--glass-fill), var(--glass-fill-2), var(--glass-fill));
+  background-size: 220% 100%;
+  animation: sig-shimmer 1.4s var(--ease) infinite;
+}
+@keyframes sig-shimmer {
+  from { background-position: 140% 0; }
+  to   { background-position: -40% 0; }
+}
+.council-loading p { margin: 0; color: var(--text-3); font-size: 12.5px; }
+
+.council-ask { display: grid; gap: 10px; }
+.council-ask textarea {
+  width: 100%; min-height: 96px; resize: vertical;
+  padding: 12px 14px; border-radius: var(--r-sm);
+  border: 1px solid var(--glass-border-soft);
+  background: var(--glass-fill); color: var(--text-1);
+  font: inherit; font-size: 13.5px;
+}
+.council-ask textarea:focus {
+  outline: none; border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+.council-ask .row { display: flex; gap: 8px; justify-content: flex-end; flex-wrap: wrap; }
+
+.sig-actions { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; margin-top: 14px; }
+.sig-actions .glass-btn { text-decoration: none; }
+
+/* Кнопка в панели действий сообщения */
+.msg-actions .receipt-btn { position: relative; }
+.msg-actions .receipt-btn::after {
+  content: ""; position: absolute; top: 4px; right: 4px;
+  width: 5px; height: 5px; border-radius: 50%; background: var(--ok);
+  box-shadow: 0 0 6px var(--ok);
+}
+
+/* ── 4. ПЕЧАТЬ / REDUCED MOTION ────────────────────────────────── */
+@media (prefers-reduced-motion: reduce) {
+  .sig-overlay, .sig-modal, .council-skeleton { animation: none; }
+}

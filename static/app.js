@@ -1413,12 +1413,17 @@ function createAssistantTurn(options = {}) {
       }
       if (meta.stopped) bits.push('остановлено');
       if (sourcesData.length) bits.push(`источников: ${sourcesData.length}`);
+      if (meta.receipt && meta.receipt.id) bits.push(`квитанция #${meta.receipt.id}`);
       bits.push(`${seconds} c`);
       metaEl.innerHTML = `<span>${bits.join(' · ')}</span>`;
 
       actionsEl.innerHTML = `
         <button type="button" data-act="copy" title="Скопировать ответ">📋 Копировать</button>
         ${speakButtonHtml()}
+        <button type="button" data-act="council" title="Несколько моделей ответят независимо">⚖️ Совет</button>
+        ${meta.receipt && meta.receipt.id
+          ? `<button type="button" class="receipt-btn" data-receipt-id="${escapeHtml(String(meta.receipt.id))}" title="Проверяемая квитанция ответа">🧾 Квитанция</button>`
+          : ''}
         <button type="button" data-act="regen" title="Ответить заново">↻ Заново</button>`;
       actionsEl.querySelector('[data-act="copy"]').addEventListener('click', () => {
         copyText(answerText || bubble.innerText);
@@ -1426,6 +1431,11 @@ function createAssistantTurn(options = {}) {
       bindSpeakButton(actionsEl, wrap, () => answerText);
       actionsEl.querySelector('[data-act="regen"]').addEventListener('click', () => {
         if (lastUserMessage) sendMessage(lastUserMessage);
+      });
+      const councilBtn = actionsEl.querySelector('[data-act="council"]');
+      if (councilBtn) councilBtn.addEventListener('click', () => {
+        if (window.NovaCouncil) window.NovaCouncil.open(lastUserMessage || lastUserText());
+        else showNotification('Совет моделей не загрузился', 'warn');
       });
       // Блок «Результат работы / Готово / Продолжай работать» отключён по просьбе владельца.
 
@@ -1452,6 +1462,7 @@ function createAssistantTurn(options = {}) {
             cost_known: meta.usage.cost_known,
           } : undefined,
           server_chat_id: meta.serverChatId || null,
+          receipt: meta.receipt && meta.receipt.id ? meta.receipt : undefined,
         }, turnChatId);
       }
       scrollToBottom();
@@ -1637,6 +1648,13 @@ function lastAssistantText() {
   return String((answer && answer.textContent) || '').trim();
 }
 
+/** Последний текст пользователя — для «Совета моделей». */
+function lastUserText() {
+  const nodes = chatContainer.querySelectorAll('.message.user .msg-bubble');
+  if (!nodes.length) return '';
+  return String(nodes[nodes.length - 1].innerText || '').trim();
+}
+
 // ══════════════════════════════════════════
 // ПОТОКОВАЯ ОБРАБОТКА NDJSON
 // ══════════════════════════════════════════
@@ -1765,7 +1783,8 @@ async function streamMessage(message, turn) {
   if (failure && !turn.text) throw new Error(failure);
   if (!turn.text) throw new Error('AI не вернул текст ответа');
   turn.finish({ model: meta.model, provider: meta.provider, offline: meta.offline,
-                serverChatId: meta.chat_id });
+                serverChatId: meta.chat_id, receipt: meta.receipt,
+                usage: meta.usage });
   return turn.text;
 }
 
@@ -1784,7 +1803,8 @@ async function sendOnce(message, turn) {
   if (!response.ok || data.error) throw new Error(data.error || ('HTTP ' + response.status));
   turn.collapseStage();
   turn.appendText(data.reply || '');
-  turn.finish({ model: data.model, serverChatId: data.chat_id });
+  turn.finish({ model: data.model, serverChatId: data.chat_id,
+                receipt: data.receipt });
   activeAbort = null;
   return data.reply;
 }
@@ -2101,10 +2121,12 @@ function appendMessage(role, content, meta = null) {
         <div class="answer">${formatted}${imageHtml}</div>
         ${sourcesHtml}
       </div>
-      ${isAI && meta?.model ? `<div class="msg-meta"><span>модель: ${escapeHtml(String(meta.model))}${meta.elapsed_ms ? ' · ' + (meta.elapsed_ms / 1000).toFixed(1) + ' c' : ''}</span></div>` : ''}
+      ${isAI && (meta?.model || meta?.receipt) ? `<div class="msg-meta"><span>${meta?.model ? `модель: ${escapeHtml(String(meta.model))}${meta.elapsed_ms ? ' · ' + (meta.elapsed_ms / 1000).toFixed(1) + ' c' : ''}` : ''}${meta?.receipt?.id ? `${meta?.model ? ' · ' : ''}квитанция #${escapeHtml(String(meta.receipt.id))}` : ''}</span></div>` : ''}
       ${isAI ? `<div class="msg-actions">
         <button type="button" data-act="copy">📋 Копировать</button>
         ${speakButtonHtml()}
+        <button type="button" data-act="council">⚖️ Совет</button>
+        ${meta?.receipt?.id ? `<button type="button" class="receipt-btn" data-receipt-id="${escapeHtml(String(meta.receipt.id))}">🧾 Квитанция</button>` : ''}
       </div>` : ''}
     </div>`;
 
@@ -2113,6 +2135,19 @@ function appendMessage(role, content, meta = null) {
   const answerText = String(content || '');
   wrap.querySelector('[data-act="copy"]')?.addEventListener('click', () => copyText(answerText));
   if (isAI) bindSpeakButton(wrap, wrap, () => answerText);
+  wrap.querySelector('[data-act="council"]')?.addEventListener('click', () => {
+    if (!window.NovaCouncil) { showNotification('Совет моделей не загрузился', 'warn'); return; }
+    const turns = Array.from(chatContainer.querySelectorAll('.message'));
+    const index = turns.indexOf(wrap);
+    for (let i = index - 1; i >= 0; i -= 1) {
+      if (turns[i].classList.contains('user')) {
+        const bubble = turns[i].querySelector('.msg-bubble');
+        window.NovaCouncil.open((bubble && bubble.innerText || '').trim());
+        return;
+      }
+    }
+    window.NovaCouncil.open('');
+  });
   wrap.querySelector('.sources-head')?.addEventListener('click', (event) => {
     event.currentTarget.parentElement.classList.toggle('min');
   });

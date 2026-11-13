@@ -1,0 +1,76 @@
+name: Production gate
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: production-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gate:
+    name: Preflight + signature tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: pip-${{ hashFiles('requirements*.txt') }}
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+      - name: Compile all modules
+        run: python -m compileall -q -x '(\.venv|__pycache__)' .
+      - name: Preflight report
+        run: |
+          python scripts/preflight.py --json > preflight.json || true
+          python - <<'PY'
+          import json
+          report = json.load(open('preflight.json', encoding='utf-8'))
+          print('version:', report['version'], 'env:', report['env'])
+          for item in report['checks']:
+              print(f"  [{item['level']}] {item['key']}: {item['message']}")
+          PY
+      - name: Signature tests (receipts, council, production, trust)
+        run: >-
+          pytest -q tests/test_receipts.py tests/test_council.py
+          tests/test_production.py tests/test_trust_center.py
+      - name: Receipt chain self-check
+        run: python -m receipts verify
+      - name: Upload preflight report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: preflight
+          path: preflight.json
+          if-no-files-found: ignore
+
+  docker:
+    name: Docker image builds
+    runs-on: ubuntu-latest
+    needs: gate
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build production image
+        run: docker build -t novamind:ci .
+      - name: Smoke the image (healthz)
+        run: |
+          docker run -d --name nova-ci -p 5055:5000 \
+            -e NOVA_ENV=production -e ADMIN_CODE=ci-only-code-1234 \
+            -e SESSION_SECRET=ci-only-session-secret-0123456789 \
+            -e RECEIPT_SECRET=ci-only-receipt-secret-0123456789 \
+            novamind:ci
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:5055/healthz; then ok=1; break; fi
+            sleep 2
+          done
+          docker logs nova-ci || true
+          test "${ok:-0}" = "1"
+          curl -fsS http://127.0.0.1:5055/readyz | tee /dev/stderr
+          docker rm -f nova-ci

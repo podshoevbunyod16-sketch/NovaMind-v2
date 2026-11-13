@@ -1,0 +1,260 @@
+/* ═══════════════════════════════════════════════════════════════════
+   NovaMind · TRUST CENTER (/trust)
+   Страница доверия: цепочка квитанций, сводка, история советов.
+   ═══════════════════════════════════════════════════════════════════ */
+.trust-body {
+  min-height: 100vh;
+  padding: 26px 20px 60px;
+  box-sizing: border-box;
+}
+.trust-shell { max-width: 1180px; margin: 0 auto; position: relative; z-index: 1; }
+
+/* ── шапка ─────────────────────────────────────────────────────── */
+.trust-top {
+  display: flex; align-items: center; gap: 14px;
+  margin-bottom: 22px; flex-wrap: wrap;
+}
+.trust-top a { text-decoration: none; }
+.trust-brand {
+  display: flex; align-items: baseline; gap: 8px;
+  font-size: 15px; font-weight: 650; letter-spacing: -.2px;
+}
+.trust-brand-mark {
+  color: var(--accent); filter: drop-shadow(0 0 10px var(--accent-glow));
+}
+.trust-brand-sub {
+  font-size: 11px; font-weight: 500; letter-spacing: .14em;
+  text-transform: uppercase; color: var(--text-4);
+}
+.trust-top-right { margin-left: auto; display: flex; align-items: center; gap: 8px; }
+
+/* ── hero ──────────────────────────────────────────────────────── */
+.trust-hero {
+  position: relative; overflow: hidden;
+  padding: 34px 34px 28px;
+  border-radius: var(--r-xl);
+  margin-bottom: 16px;
+}
+.trust-hero-glow {
+  position: absolute; inset: -40% -20% auto;
+  height: 320px;
+  background:
+    radial-gradient(45% 60% at 22% 40%, var(--accent-glow), transparent 70%),
+    radial-gradient(40% 60% at 78% 30%, color-mix(in srgb, var(--accent-2) 45%, transparent), transparent 72%);
+  opacity: .55; filter: blur(28px); pointer-events: none;
+}
+.trust-hero-content { position: relative; max-width: 760px; }
+.trust-hero h1 {
+  margin: 14px 0 12px;
+  font-size: clamp(26px, 4.2vw, 40px);
+  line-height: 1.14; letter-spacing: -.9px; font-weight: 700;
+  background: linear-gradient(120deg, var(--text-1), color-mix(in srgb, var(--accent-2) 65%, var(--text-1)));
+  -webkit-background-clip: text; background-clip: text; color: transparent;
+}
+.trust-hero p {
+  margin: 0 0 20px; max-width: 640px;
+  color: var(--text-2); font-size: 14px; line-height: 1.65;
+}
+.trust-hero-actions { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+.trust-hero-actions .glass-btn { text-decoration: none; }
+
+.chain-badge {
+  display: inline-flex; align-items: center; gap: 9px;
+  margin-top: 20px; padding: 9px 14px;
+  border-radius: var(--r-pill);
+  border: 1px solid var(--glass-border-soft);
+  background: var(--glass-fill);
+  font-size: 12.5px; color: var(--text-2);
+  transition: var(--t) var(--ease);
+}
+.chain-badge[data-state="ok"] {
+  border-color: color-mix(in srgb, var(--ok) 38%, transparent);
+  background: color-mix(in srgb, var(--ok) 12%, transparent);
+  color: var(--ok);
+}
+.chain-badge[data-state="bad"] {
+  border-color: color-mix(in srgb, var(--err) 42%, transparent);
+  background: color-mix(in srgb, var(--err) 14%, transparent);
+  color: var(--err);
+}
+.chain-badge[data-state="checking"] { border-color: color-mix(in srgb, var(--accent) 40%, transparent); }
+
+/* ── сводка ────────────────────────────────────────────────────── */
+.trust-stats {
+  display: grid; gap: 12px; margin-bottom: 16px;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+@media (max-width: 860px) { .trust-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+.trust-stat {
+  padding: 16px 18px; border-radius: var(--r-md);
+  display: flex; flex-direction: column; gap: 4px;
+}
+.trust-stat-label {
+  font-size: 10.5px; letter-spacing: .13em; text-transform: uppercase; color: var(--text-4);
+}
+.trust-stat strong {
+  font-size: 26px; font-weight: 700; letter-spacing: -1px; line-height: 1.1;
+  font-variant-numeric: tabular-nums;
+}
+.trust-stat-sub { font-size: 11.5px; color: var(--text-3); }
+
+/* ── панели ────────────────────────────────────────────────────── */
+.trust-grid {
+  display: grid; gap: 16px; margin-bottom: 16px;
+  grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr);
+  align-items: start;
+}
+@media (max-width: 980px) { .trust-grid { grid-template-columns: 1fr; } }
+.trust-panel { padding: 20px 20px 16px; border-radius: var(--r-lg); }
+.trust-panel-head {
+  display: flex; align-items: flex-start; gap: 12px;
+  margin-bottom: 12px;
+}
+.trust-panel-head h2 { margin: 0 0 4px; font-size: 16px; font-weight: 650; letter-spacing: -.2px; }
+.trust-panel-head p { margin: 0; font-size: 12.5px; color: var(--text-3); line-height: 1.5; }
+.trust-panel-head .lg-chip, .trust-panel-head .glass-btn { margin-left: auto; flex: 0 0 auto; }
+
+.trust-skeleton {
+  height: 58px; margin-bottom: 8px; border-radius: var(--r-sm);
+  background: linear-gradient(90deg, var(--glass-fill), var(--glass-fill-2), var(--glass-fill));
+  background-size: 220% 100%;
+  animation: trust-shimmer 1.4s var(--ease) infinite;
+}
+@keyframes trust-shimmer {
+  from { background-position: 140% 0; }
+  to   { background-position: -40% 0; }
+}
+
+/* ── список квитанций ──────────────────────────────────────────── */
+.receipt-list { display: flex; flex-direction: column; gap: 8px; max-height: 520px; overflow: auto; }
+.receipt-list:empty::after,
+.receipt-list[data-empty-shown="1"]::after {
+  content: attr(data-empty);
+  display: block; padding: 26px 12px; text-align: center;
+  color: var(--text-4); font-size: 12.5px;
+}
+.receipt-item {
+  display: grid; gap: 6px;
+  width: 100%; text-align: left; cursor: pointer;
+  padding: 11px 13px; border-radius: var(--r-sm);
+  border: 1px solid var(--glass-border-soft);
+  background: var(--glass-fill);
+  transition: var(--t-fast) var(--ease);
+  color: inherit; font: inherit;
+}
+.receipt-item:hover {
+  background: var(--glass-fill-2);
+  border-color: color-mix(in srgb, var(--accent) 30%, transparent);
+  transform: translateY(-1px);
+}
+.receipt-item-top { display: flex; align-items: center; gap: 8px; font-size: 12.5px; }
+.receipt-item-top .id {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11.5px; color: var(--accent-2);
+}
+.receipt-item-top .kind { font-weight: 600; color: var(--text-1); }
+.receipt-item-top .when { margin-left: auto; color: var(--text-4); font-size: 11px; }
+.receipt-item-hash {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10.5px; color: var(--text-4);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.receipt-item-meta {
+  display: flex; gap: 10px; flex-wrap: wrap;
+  font-size: 11px; color: var(--text-3);
+}
+
+/* ── история советов ───────────────────────────────────────────── */
+.council-history { display: flex; flex-direction: column; gap: 8px; }
+.council-history:empty::after {
+  content: attr(data-empty); display: block; padding: 20px 6px;
+  color: var(--text-4); font-size: 12.5px; text-align: center;
+}
+.council-item {
+  padding: 11px 13px; border-radius: var(--r-sm);
+  border: 1px solid var(--glass-border-soft);
+  background: var(--glass-fill);
+}
+.council-item-q {
+  font-size: 12.5px; color: var(--text-2); line-height: 1.45;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.council-item-foot {
+  display: flex; align-items: center; gap: 8px; margin-top: 7px;
+  font-size: 11px; color: var(--text-4);
+}
+.agreement-bar {
+  flex: 1; height: 5px; border-radius: 99px;
+  background: color-mix(in srgb, var(--glass-fill) 220%, transparent);
+  overflow: hidden;
+}
+.agreement-bar span {
+  display: block; height: 100%; border-radius: 99px;
+  background: linear-gradient(90deg, var(--accent), var(--accent-2));
+  transition: width .6s var(--ease);
+}
+.agreement-value { font-variant-numeric: tabular-nums; color: var(--text-2); min-width: 34px; }
+
+.trust-how {
+  display: grid; gap: 8px; margin-top: 14px;
+  padding-top: 14px; border-top: 1px dashed var(--glass-border-soft);
+}
+.trust-how-step { display: flex; gap: 9px; align-items: flex-start; }
+.trust-how-step span {
+  flex: 0 0 auto; width: 20px; height: 20px; border-radius: 50%;
+  display: grid; place-items: center;
+  font-size: 10.5px; font-weight: 700;
+  background: var(--accent-soft); color: color-mix(in srgb, var(--accent) 70%, white);
+}
+.trust-how-step p { margin: 1px 0 0; font-size: 12px; color: var(--text-3); line-height: 1.45; }
+
+/* ── «как проверить» ───────────────────────────────────────────── */
+.trust-about { margin-bottom: 10px; }
+.trust-about h2 { margin: 0 0 14px; font-size: 16px; font-weight: 650; }
+.trust-about-grid {
+  display: grid; gap: 14px; grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+@media (max-width: 860px) { .trust-about-grid { grid-template-columns: 1fr; } }
+.trust-about-grid h3 { margin: 0 0 6px; font-size: 13px; font-weight: 640; color: var(--text-1); }
+.trust-about-grid p { margin: 0; font-size: 12.5px; color: var(--text-3); line-height: 1.55; }
+.trust-about-grid code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11.5px; padding: 1px 5px; border-radius: 6px;
+  background: var(--glass-fill-2); color: var(--accent-2);
+}
+.trust-footer {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  margin-top: 18px; padding-top: 14px;
+  border-top: 1px solid var(--glass-border-soft);
+  font-size: 11.5px; color: var(--text-4);
+}
+
+@media (max-width: 640px) {
+  .trust-body { padding: 16px 12px 40px; }
+  .trust-hero { padding: 24px 20px 22px; }
+  .trust-stat strong { font-size: 21px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .trust-skeleton, .receipt-item { animation: none; transition: none; }
+}
+
+/* ── пример пустой цепочки ──────────────────────────────────────── */
+.trust-demo-note {
+  padding: 12px 14px; margin-bottom: 8px;
+  border-radius: var(--r-sm);
+  border: 1px dashed color-mix(in srgb, var(--accent) 32%, transparent);
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+  color: var(--text-3); font-size: 12px; line-height: 1.5;
+}
+.receipt-item.is-demo {
+  cursor: default; opacity: .62;
+  border-style: dashed;
+}
+.receipt-item.is-demo:hover { transform: none; background: var(--glass-fill); }
+.receipt-item .who-demo {
+  margin-left: auto; padding: 1px 7px; border-radius: 99px;
+  font-size: 10px; letter-spacing: .08em; text-transform: uppercase;
+  color: var(--text-4); border: 1px solid var(--glass-border-soft);
+}
+.council-item.is-demo { opacity: .62; border-style: dashed; }

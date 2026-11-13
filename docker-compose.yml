@@ -1,0 +1,40 @@
+# ══════════════════════════════════════════════════════════════════
+# NovaMind · production compose
+# ──────────────────────────────────────────────────────────────────
+#   cp .env.production.example .env.production
+#   docker compose up -d --build
+#   docker compose logs -f
+# ══════════════════════════════════════════════════════════════════
+services:
+  novamind:
+    build: .
+    image: novamind:v3
+    restart: unless-stopped
+    ports:
+      - "${PORT:-5000}:5000"
+    env_file:
+      - .env.production
+    environment:
+      NOVA_ENV: production
+      NOVA_DB_PATH: /data/novamind_chats.db
+      KNOWLEDGE_DB: /data/knowledge.db
+      TRACE_DIR: /data/traces
+      TRUST_PROXY: "1"
+    volumes:
+      - novamind-data:/data
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request,sys;sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:5000/healthz',timeout=4).status==200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 25s
+    deploy:
+      resources:
+        limits:
+          memory: 1g
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  novamind-data:

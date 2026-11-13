@@ -4,13 +4,30 @@ services:
     runtime: python
     plan: free
     buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn app:app --bind 0.0.0.0:$PORT --workers 1 --threads 4 --timeout 180
-    healthCheckPath: /
+    startCommand: gunicorn -c gunicorn.conf.py wsgi:application
+    # Liveness: процесс жив и отвечает. Readiness (/readyz) проверяйте мониторингом.
+    healthCheckPath: /healthz
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.9
-      - key: SECRET_KEY
+      - key: NOVA_ENV
+        value: production
+      # Секрет подписи сессий: Render генерирует сам.
+      - key: SESSION_SECRET
         generateValue: true
+      # Секрет подписи квитанций: общий для всех инстансов.
+      - key: RECEIPT_SECRET
+        generateValue: true
+      # Код администратора задайте вручную — иначе production не стартует
+      # (это защита от дефолтных секретов, см. production.py).
+      - key: ADMIN_CODE
+        sync: false
+      - key: SITE_URL
+        sync: false
+      - key: GROQ_API_KEY
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
       - key: OPENAI_API_KEY
         sync: false
       - key: GITHUB_TOKEN

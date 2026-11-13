@@ -573,8 +573,11 @@ check('сцена убрана из пузыря', stage.classList.contains('lg-
 check('источники остались видимыми', lastBubble.querySelectorAll('.source-item').length === 2);
 check('мета ответа показана', lastBubble.parentElement.querySelector('.msg-meta').textContent.includes('mock-model'),
   lastBubble.parentElement.querySelector('.msg-meta')?.textContent);
-check('действия ответа доступны',
-  lastBubble.parentElement.querySelectorAll('.msg-actions button').length === 3);
+const actionButtons = lastBubble.parentElement.querySelectorAll('.msg-actions button');
+check('действия ответа доступны', actionButtons.length === 4,
+  `${actionButtons.length} кнопок`);
+check('совет моделей доступен из ответа',
+  Boolean(lastBubble.parentElement.querySelector('[data-act="council"]')));
 check('сообщение пользователя в чате',
   document.querySelectorAll('.message.user').length === 1);
 check('история сохранена', JSON.parse(window.localStorage.getItem('nova_history_v2')).chats.length === 1);

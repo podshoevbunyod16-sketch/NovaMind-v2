@@ -76,6 +76,7 @@ def isolated_env(tmp_path, monkeypatch):
     security.login_limiter.clear()
     security.agent_limiter.clear()
     security.tts_limiter.clear()
+    security.council_limiter.clear()
 
     # Трассы и база знаний: у каждого теста свои файлы. Иначе «последние
     # трассы» и документы предыдущего теста попадали в следующий, и тесты
@@ -118,6 +119,12 @@ def client(tmp_path, monkeypatch, isolated_env):
     # Lazy schema caches outlive a temporary file if pytest reuses its path.
     database._runs_ready.discard(database.DB_PATH)
     database.init_db()
+    # Квитанции и журнал советов кэшируют «таблица создана» по пути БД:
+    # у каждого теста своя база, значит и свой кэш.
+    import receipts
+    import council
+    receipts.reset_cache()
+    council.reset_cache()
 
     import routes.media as media_routes
     monkeypatch.setattr(media_routes, "MEDIA_DIR", str(tmp_path / "generated_media"))

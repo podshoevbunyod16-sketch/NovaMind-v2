@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="ru" data-glass-theme="aurora">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="theme-color" content="#070713" />
+  <title>NovaMind · Trust Center</title>
+  <link rel="stylesheet" href="/static/liquid-glass.css">
+  <link rel="stylesheet" href="/static/signature.css">
+  <link rel="stylesheet" href="/static/trust.css">
+</head>
+<body class="trust-body">
+
+<div class="lg-grain" aria-hidden="true"></div>
+<div class="lg-vignette" aria-hidden="true"></div>
+
+<div class="trust-shell">
+
+  <header class="trust-top">
+    <a class="glass-btn is-sm" href="/chat">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" width="14" height="14">
+        <line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/>
+      </svg>
+      В чат
+    </a>
+    <div class="trust-brand">
+      <span class="trust-brand-mark">✦</span>
+      NovaMind <span class="trust-brand-sub">Trust Center</span>
+    </div>
+    <div class="trust-top-right">
+      <span class="lg-chip" id="envChip" title="Окружение">…</span>
+      <button class="glass-btn is-sm is-icon" id="btnTheme" type="button" title="Сменить тему">◐</button>
+    </div>
+  </header>
+
+  <main class="trust-main">
+
+    <section class="trust-hero glass-card">
+      <div class="trust-hero-glow" aria-hidden="true"></div>
+      <div class="trust-hero-content">
+        <span class="lg-chip acc">Nova Receipts · v1</span>
+        <h1>Каждому ответу — квитанция.<br>Каждой квитанции — проверка.</h1>
+        <p>
+          NovaMind записывает каждый ответ в цепочку с хэшем и HMAC-подписью:
+          видно, какая модель отвечала, какие промпты и инструменты были активны,
+          сколько это стоило. Измените или удалите запись — цепочка это покажет.
+        </p>
+        <div class="trust-hero-actions">
+          <button class="glass-btn is-primary" id="btnVerify" type="button">Проверить цепочку</button>
+          <a class="glass-btn" href="/api/receipts/export">Экспорт JSONL</a>
+          <button class="glass-btn" id="btnCouncil" type="button">⚖️ Спросить совет</button>
+        </div>
+        <div class="chain-badge" id="chainBadge" data-state="pending">
+          <span class="lg-dot pulse"></span>
+          <span>Цепочка ещё не проверена</span>
+        </div>
+      </div>
+    </section>
+
+    <section class="trust-stats" aria-label="Сводка">
+      <div class="trust-stat glass-card">
+        <span class="trust-stat-label">Квитанций</span>
+        <strong id="statReceipts">—</strong>
+        <span class="trust-stat-sub" id="statReceiptsSub">в цепочке</span>
+      </div>
+      <div class="trust-stat glass-card">
+        <span class="trust-stat-label">Токенов</span>
+        <strong id="statTokens">—</strong>
+        <span class="trust-stat-sub">оценка по всем ходам</span>
+      </div>
+      <div class="trust-stat glass-card">
+        <span class="trust-stat-label">Стоимость</span>
+        <strong id="statCost">—</strong>
+        <span class="trust-stat-sub">по известным тарифам</span>
+      </div>
+      <div class="trust-stat glass-card">
+        <span class="trust-stat-label">Готовность</span>
+        <strong id="statReady">—</strong>
+        <span class="trust-stat-sub" id="statReadySub">/readyz</span>
+      </div>
+    </section>
+
+    <section class="trust-grid">
+      <div class="glass-card trust-panel">
+        <div class="trust-panel-head">
+          <div>
+            <h2>Живая цепочка</h2>
+            <p>Последние квитанции. Нажмите на запись, чтобы проверить её звено.</p>
+          </div>
+          <span class="lg-chip" id="headChip">голова …</span>
+        </div>
+        <div class="receipt-list" id="receiptList" data-empty="Пока нет квитанций — задайте первый вопрос в чате.">
+          <div class="trust-skeleton"></div>
+          <div class="trust-skeleton"></div>
+          <div class="trust-skeleton"></div>
+        </div>
+      </div>
+
+      <div class="glass-card trust-panel">
+        <div class="trust-panel-head">
+          <div>
+            <h2>Совет моделей</h2>
+            <p>История: насколько сходились модели и что из этого вышло.</p>
+          </div>
+          <button class="glass-btn is-sm" id="btnCouncil2" type="button">Собрать</button>
+        </div>
+        <div class="council-history" id="councilHistory" data-empty="Советов ещё не было.">
+          <div class="trust-skeleton"></div>
+          <div class="trust-skeleton"></div>
+        </div>
+        <div class="trust-how">
+          <div class="trust-how-step"><span>1</span><p>Один вопрос уходит нескольким моделям параллельно.</p></div>
+          <div class="trust-how-step"><span>2</span><p>Ответы сравниваются по смыслу предложений.</p></div>
+          <div class="trust-how-step"><span>3</span><p>Вы видите общие тезисы, расхождения и квитанцию совета.</p></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="glass-card trust-panel trust-about">
+      <h2>Почему это можно проверить самому</h2>
+      <div class="trust-about-grid">
+        <div>
+          <h3>Хэш цепочки</h3>
+          <p>Каждая запись содержит хэш предыдущей. Удаление или правка ломает связь —
+             проверка покажет номер первой поломки.</p>
+        </div>
+        <div>
+          <h3>HMAC-подпись</h3>
+          <p>Подпись считается секретом сервера. Без секрета запись не подделать,
+             даже имея доступ к базе.</p>
+        </div>
+        <div>
+          <h3>Экспорт и CLI</h3>
+          <p>Выгрузите JSONL и проверьте локально: <code>python -m receipts verify</code>.
+             Никаких закрытых форматов.</p>
+        </div>
+      </div>
+      <div class="trust-footer">
+        <span id="versionChip">NovaMind</span>
+        <span class="lg-dot ok"></span>
+        <span>Все проверки выполняются на этом сервере и не отправляют данные наружу.</span>
+      </div>
+    </section>
+
+  </main>
+</div>
+
+<script src="/static/trust.js"></script>
+<script src="/static/signature.js"></script>
+</body>
+</html>

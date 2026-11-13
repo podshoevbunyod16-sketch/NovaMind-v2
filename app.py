@@ -33,6 +33,13 @@ app.config["MAX_CONTENT_LENGTH"] = 500 * 1024 * 1024  # 500 MB
 for bp in ALL_BLUEPRINTS:
     app.register_blueprint(bp)
 
+# ---------- Production-обвязка ----------
+# Проверки окружения, доверенный прокси, security-заголовки, request id,
+# здоровье /healthz и /readyz, /version и Prometheus /metrics.
+import production  # noqa: E402 — после регистрации маршрутов
+production.install(app)
+production.enforce_startup()
+
 # ---------- Инициализация ----------
 init_db()
 load_plugins()

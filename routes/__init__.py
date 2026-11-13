@@ -18,6 +18,9 @@ from .tts import tts_bp
 from .workspace import workspace_bp
 from .react_agent import react_bp
 from .github_agent import github_agent_bp
+from .receipts import receipts_bp
+from .council import council_bp
+from .trust import trust_bp
 
 from routes.platform import platform_bp
 
@@ -41,4 +44,7 @@ ALL_BLUEPRINTS = [
     workspace_bp,
     react_bp,
     github_agent_bp,
+    receipts_bp,
+    council_bp,
+    trust_bp,
 ]
