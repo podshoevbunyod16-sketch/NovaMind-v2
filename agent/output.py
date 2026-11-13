@@ -39,6 +39,63 @@ _TRUNCATED_END = re.compile(r"(?iu)(?:[,;:—–-]|\b(?:на|и|в|с|для|к�
 _QUOTED = re.compile(r'["“«]([^"”»]{45,1000})["”»]', re.S)
 _CYRILLIC = re.compile(r"[А-Яа-яЁё]")
 
+#: Хвост-подпись, которая ничего не обрывает, а только анонсирует список:
+#: «Источники:», «Список ссылок:», «Sources:». Модели (особенно после веб-поиска)
+#: заканчивают ответ такой строкой, потому что ссылки рисует интерфейс. Раньше
+#: двоеточие в конце считалось признаком обрыва, ответ отбрасывался, и
+#: пользователь вместо данных видел «не удалось получить чистый ответ».
+_LABEL_WORDS = re.compile(
+    r"(?iu)^(?:"
+    r"источник(?:и|ов|а)?|ссылки(?:\s+на\s+источники)?|"
+    r"список\s+(?:ссылок|источников)|литература|см\.?\s*также|"
+    r"дополнительно|подробнее|по\s+теме|"
+    r"sources?|references?|links?|further\s+reading"
+    r")(?:\s*\([^)]*\))?$"
+)
+#: Последняя строка, после которой текст явно не закончен (анонс продолжения).
+_OPEN_TAIL_WORDS = re.compile(
+    r"(?iu)^(?:итог|вывод|выводы|резюме|в\s+итоге|таким\s+образом|"
+    r"продолжение|далее|summary|conclusion|to\s+be\s+continued)$"
+)
+_EMPHASIS = re.compile(r"(?:\*\*|__|\*|_)+")
+_TRAILING_REFS = re.compile(r"[\s,;]*\[\s*[0-9][0-9,\s\-–—]*\][\s,;.\[\]0-9\-–—]*$")
+_SENTENCE_END = re.compile(r"[.!?…»\"')\]]$")
+
+
+def _announcement_label(line: str) -> str:
+    """Return the bare label of an announcement line («**Источники:** [1]» → label)."""
+    text = _EMPHASIS.sub("", str(line or "").strip())
+    text = text.lstrip("#").strip()
+    text = _TRAILING_REFS.sub("", text)
+    text = re.sub(r"\s*[:：]\s*$", "", text)
+    text = re.sub(r"[\s:\-–—]+$", "", text)
+    return text.strip()
+
+
+def _strip_announcement_tail(text: str) -> str:
+    """Remove a trailing «Источники:» / «Итог:» label that only announces a list.
+
+    Such a line is not a cut-off sentence: the sources are rendered by the
+    interface under the bubble. Dropping it keeps the answer usable instead of
+    rejecting it as "incomplete" and showing the user a failure notice.
+    Ordinary prose such as «Источники энергии в Таджикистане:» is not a bare
+    label and stays untouched.
+    """
+    lines = str(text or "").rstrip().splitlines()
+    removed = False
+    while lines:
+        last = lines[-1].strip()
+        if not last:
+            lines.pop()
+            continue
+        label = _announcement_label(last)
+        if label and (_LABEL_WORDS.fullmatch(label) or _OPEN_TAIL_WORDS.fullmatch(label)):
+            lines.pop()
+            removed = True
+            continue
+        break
+    return "\n".join(lines).strip() if removed else str(text or "").strip()
+
 
 def _prepare(raw: str) -> str:
     text = str(raw or "").strip()
@@ -67,7 +124,7 @@ def _prepare(raw: str) -> str:
     cleaned = _INLINE_PROCESS_TAIL.sub("", cleaned).strip()
     if _META_START.search(cleaned):
         return ""
-    return cleaned
+    return _strip_announcement_tail(cleaned)
 
 
 def is_truncated_answer(raw: str) -> bool:

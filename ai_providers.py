@@ -889,8 +889,23 @@ def _chat_completion_once(messages, provider=None, model=None, system=None,
         logger.warning("Неожиданный формат ответа (provider=%s, model=%s)", provider, model, exc_info=True)
         return None, "Провайдер вернул ответ в неожиданном формате"
     if not text.strip() and not tool_calls:
-        logger.warning("Пустые content и reasoning (provider=%s, model=%s)", provider, model)
-        return None, "Провайдер вернул пустой ответ (content и reasoning отсутствуют)"
+        finish_reason = str(((data.get("choices") or [{}])[0] or {}).get("finish_reason") or "")
+        usage = data.get("usage") if isinstance(data, dict) else None
+        if finish_reason.lower() in {"length", "max_tokens"}:
+            # Reasoning-модели (gpt-oss и подобные) тратят весь лимит на скрытые
+            # рассуждения и отдают пустой content. Это исправляется повтором с
+            # большим лимитом, а не сообщением «провайдер вернул пустой ответ».
+            logger.warning("Ответ обрезан по max_tokens без текста (provider=%s, model=%s)",
+                           provider, model)
+            return None, (f"Пустой ответ: модель израсходовала лимит max_tokens "
+                          f"({payload.get('max_tokens')}) на рассуждения")
+        logger.warning("Пустые content и reasoning (provider=%s, model=%s, "
+                       "finish_reason=%s, usage=%s, tools=%s)", provider, model,
+                       finish_reason or "-", usage, bool(tools_payload))
+        return None, ("Провайдер вернул пустой ответ (content и reasoning отсутствуют). "
+                      f"finish_reason={finish_reason or '—'}" +
+                      ("; запрос содержал tools — модель могла не поддержать нативный "
+                       "tool calling" if tools_payload else ""))
     degraded_fields = list((local_caps or {}).get("degraded") or [])
     result_meta = {"provider": provider, "model": model, "offline": False,
                    "tool_calls": tool_calls,

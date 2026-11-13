@@ -130,7 +130,15 @@ def _normalize_native(raw: Any) -> list[dict]:
             except ValueError:
                 args = None
         if isinstance(name, str):
-            calls.append({"tool": name, "arguments": args})
+            call = {"tool": name, "arguments": args}
+            # Keep the provider's call id: native tool protocols (OpenAI, Gemini
+            # functionCall/functionResponse) require the observation to carry the
+            # id of the call it answers.
+            if item.get("id"):
+                call["id"] = str(item.get("id"))
+            if item.get("arguments_error"):
+                call["arguments_error"] = str(item.get("arguments_error"))
+            calls.append(call)
     return calls
 
 
@@ -252,6 +260,218 @@ def _offline_action_answer(goal: str, observation: dict) -> str:
     return ""
 
 
+#: Errors worth one more attempt with the *same* provider/model. Everything else
+#: (bad model, bad key, bad request) is reported immediately — a retry would only
+#: burn the time budget.
+_TRANSIENT_ERROR = re.compile(
+    r"(?iu)(?:\b429\b|rate.?limit|лимит запросов|превышен лимит|"
+    r"\b5\d\d\b|timeout|таймаут|timed out|временно недоступ|temporarily unavailable|"
+    r"connection|соединение|network|upstream|overloaded|перегружен)")
+
+
+def _transient_failure(meta: Any) -> bool:
+    if not isinstance(meta, str) or not meta.strip():
+        return False
+    if re.search(r"(?iu)(\b400\b|\b401\b|\b403\b|\b404\b|invalid|неизвестн|"
+                 r"платн|not configured|не подключ)", meta):
+        return False
+    if re.search(r"(?iu)(пустой ответ|empty (?:response|answer)|finish_reason=(?:length|max_tokens))",
+                 meta):
+        # Empty-but-not-failed responses (a reasoning model that burned the budget)
+        # are worth one more ask, but not a retry storm.
+        return True
+    return bool(_TRANSIENT_ERROR.search(meta))
+
+
+def _retry_budget(ctx: AgentContext, deadline: float) -> tuple[int, float]:
+    """How many extra attempts and how long to wait between them."""
+    try:
+        attempts = max(0, min(3, int(os.getenv("AGENT_PROVIDER_RETRIES", "2"))))
+    except (TypeError, ValueError):
+        attempts = 2
+    try:
+        base = max(0.0, min(20.0, float(os.getenv("AGENT_PROVIDER_RETRY_DELAY", "1.5"))))
+    except (TypeError, ValueError):
+        base = 1.5
+    return attempts, base
+
+
+def _complete_once(ctx: AgentContext, messages: list[dict], warning: str,
+                   token_budget: int, deadline: float, tools) -> tuple[Any, Any]:
+    """One model call with a bounded retry for transient provider failures."""
+    attempts, base_delay = _retry_budget(ctx, deadline)
+    last_response, last_meta = None, ""
+    for attempt in range(attempts + 1):
+        try:
+            response, meta = ctx.complete(
+                messages, provider=ctx.provider, model=ctx.model,
+                system=_system_prompt() + warning, temperature=0.2,
+                max_tokens=token_budget,
+                timeout=max(.2, min(45.0, deadline - ctx.clock())),
+                tools=tools,
+            )
+        except Exception as error:  # noqa: BLE001 — провайдер может бросить что угодно
+            response, meta = None, f"{type(error).__name__}: {error}"
+        if response is not None:
+            return response, meta
+        last_response, last_meta = None, meta
+        if attempt >= attempts or not _transient_failure(meta):
+            break
+        if ctx.cancel and ctx.cancel.is_set():
+            break
+        remaining = deadline - ctx.clock() - 1.0
+        if remaining <= 0.2:
+            break
+        delay = min(base_delay * (2 ** attempt), remaining)
+        if isinstance(meta, str) and re.search(r"(?iu)(429|rate.?limit|лимит)", meta):
+            ctx.emit({"type": "step", "text": "Провайдер ограничил частоту запросов — "
+                                              "повторяю через мгновение…"})
+        else:
+            ctx.emit({"type": "step", "text": "Модель не ответила с первого раза — "
+                                              "повторяю запрос…"})
+        wait_until = ctx.clock() + delay
+        while ctx.clock() < wait_until:
+            if ctx.cancel and ctx.cancel.is_set():
+                break
+            time.sleep(min(0.2, max(0.0, wait_until - ctx.clock())))
+    return last_response, last_meta
+
+
+def _observation_json(event: dict, limit: int) -> str:
+    """Serialize a tool observation without ever producing broken JSON.
+
+    A hard byte cut (``json.dumps(event)[:limit]``) used to hand the model an
+    unterminated string — the classic «поиск нашёл данные, а ИИ не отвечает»
+    symptom: the next request contained invalid JSON and the provider either
+    failed or the model ignored the observation. Long payloads are now trimmed
+    field by field and the cut is marked inside the JSON string itself.
+    """
+    try:
+        encoded = json.dumps(event, ensure_ascii=False, default=str)
+    except (TypeError, ValueError):
+        encoded = json.dumps({"ok": False, "error": {"type": "unserializable_result",
+                                                     "message": "Результат инструмента не сериализуется"}})
+    if len(encoded) <= limit:
+        return encoded
+
+    def shrink(value: Any, budget: int) -> Any:
+        if isinstance(value, str):
+            return value if len(value) <= budget else value[:max(0, budget)] + "… [вывод обрезан]"
+        if isinstance(value, list):
+            sliced = [shrink(item, budget) for item in value[:12]]
+            if len(value) > 12:
+                sliced.append(f"… ещё {len(value) - 12} элементов скрыто")
+            return sliced
+        if isinstance(value, dict):
+            keep = {"ok", "error", "results", "result", "content", "output", "count",
+                    "path", "url", "title", "query", "exit_code", "kind", "hint"}
+            return {key: shrink(item, budget) for key, item in value.items()
+                    if key in keep or key in {"type", "message"}}
+        return value
+
+    budget = max(200, limit // 8)
+    while budget > 24 and len(json.dumps(shrink(event, budget), ensure_ascii=False,
+                                         default=str)) > limit:
+        budget //= 2
+    trimmed = shrink(event, budget)
+    encoded = json.dumps(trimmed, ensure_ascii=False, default=str)
+    if len(encoded) > limit:
+        encoded = json.dumps({"ok": event.get("ok", False), "truncated": True,
+                              "note": "Результат инструмента слишком большой и скрыт; "
+                                      "запросите меньший фрагмент (limit/path) или другой источник."},
+                             ensure_ascii=False)
+    return encoded
+
+
+def _evidence_answer(goal: str, observations: list[dict], reason: str = "") -> str:
+    """Answer without the model, from data the tools already returned.
+
+    When the provider dies *after* a successful tool call (rate limit, quota,
+    timeout, mid-stream reset), the user has already seen the search running.
+    Replying with a bare «Не удалось получить ответ модели» looks like the agent
+    is broken, although the real data is already in the observation log. This
+    builds an honest digest of that data instead of throwing it away.
+    """
+    def clip(text: Any, limit: int) -> str:
+        value = " ".join(str(text or "").split())
+        return value[:limit] + ("…" if len(value) > limit else "")
+
+    sources: list[dict] = []
+    lines: list[str] = []
+    seen_urls: set[str] = set()
+    for item in observations or []:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("tool") or "")
+        result = item.get("result") if isinstance(item.get("result"), dict) else {}
+        if result.get("ok") is False:
+            continue
+        if name in {"web_search", "search"}:
+            for entry in result.get("results") or []:
+                if not isinstance(entry, dict) or not entry.get("url"):
+                    continue
+                url = str(entry.get("url"))
+                if url in seen_urls:
+                    continue
+                seen_urls.add(url)
+                sources.append(entry)
+        elif name == "web_open" and result.get("content"):
+            lines.append(f"**{clip(item.get('arguments', {}).get('url') or 'Страница', 120)}** — "
+                         f"{clip(result.get('content'), 400)}")
+        elif name == "knowledge_search":
+            for entry in (result.get("results") or [])[:4]:
+                if isinstance(entry, dict) and entry.get("text"):
+                    lines.append(f"[{entry.get('ref') or 'K'}] {clip(entry['text'], 320)}")
+        elif name in {"shell", "bash", "python", "terminal"}:
+            output = result.get("stdout") or result.get("result") or result.get("output") or ""
+            if str(output).strip():
+                lines.append(f"`{clip(item.get('arguments', {}).get('command') or name, 100)}` → "
+                             f"{clip(output, 300)}")
+        elif name in {"file_read"} and (result.get("content") or result.get("result")):
+            lines.append(f"{clip(item.get('arguments', {}).get('path') or 'файл', 120)}: "
+                         f"{clip(result.get('content') or result.get('result'), 300)}")
+        elif name in {"file_write", "file_edit"} and result.get("ok"):
+            lines.append(f"Файл: {clip(result.get('path') or item.get('arguments', {}).get('path'), 160)}")
+        elif name in {"image", "audio", "video"} and isinstance(result.get("result"), dict):
+            media = result["result"]
+            lines.append(f"Медиа готово: {clip(media.get('url') or media.get('filename'), 200)}")
+
+    if not sources and not lines:
+        return ""
+
+    ru_intro = "Модель не ответила — привожу данные, которые уже получены инструментами:"
+    try:
+        import language_policy
+        intro = language_policy.pick(
+            en="The model did not answer, so here is the data the tools already returned:",
+            ru=ru_intro,
+            tg="Модел ҷавоб надод — маълумотеро меорам, ки аллакай бо асбобҳо гирифта шуд:")
+        sources_heading = language_policy.pick(
+            en="Sources", ru="Источники", tg="Сарчашмаҳо")
+    except Exception:  # noqa: BLE001 — локализация не должна ломать ответ
+        intro, sources_heading = ru_intro, "Источники"
+    parts = [intro, ""]
+    if reason:
+        parts.append(f"_{clip(reason, 300)}_")
+        parts.append("")
+    if sources:
+        parts.append("## " + sources_heading)
+        for index, source in enumerate(sources[:8], 1):
+            title = clip(source.get("title") or source.get("url"), 160)
+            snippet = clip(source.get("snippet") or source.get("content") or "", 260)
+            parts.append(f"{index}. **{title}** — {source.get('url')}")
+            if snippet:
+                parts.append(f"   {snippet}")
+        parts.append("")
+    if lines:
+        parts.extend(lines[:8])
+        parts.append("")
+    parts.append("_Ответ собран без модели из уже полученных данных. "
+                 "Проверьте ключи и лимиты провайдера и повторите вопрос, "
+                 "чтобы получить полный разбор._")
+    return "\n".join(parts).strip()
+
+
 def run_react(ctx: AgentContext) -> AgentResult:
     """Run one task. Every non-success path still returns a user-facing answer."""
     started = ctx.clock()
@@ -293,6 +513,7 @@ def run_react(ctx: AgentContext) -> AgentResult:
     workspace_revision = 0
     mcp_failure_note = ""
     seen = set()
+    emitted_source_urls: set[str] = set()
     mcp_attempts: dict[str, int] = {}
     mcp_succeeded: set[str] = set()
     try:
@@ -338,6 +559,7 @@ def run_react(ctx: AgentContext) -> AgentResult:
     answer_prefix = ""
     approvals = set(ctx.approvals or [])
     consecutive_tool_errors = 0
+    repeat_strikes = 0
     force_final_response = False
 
     def record_tool_outcome(failed: bool) -> None:
@@ -369,9 +591,14 @@ def run_react(ctx: AgentContext) -> AgentResult:
             fallback = "Достигнут лимит шагов. Выполненные действия сохранены; оставшуюся часть задачи выполнить не удалось."
             status = "budget_exhausted"
             break
-        used = sum(len(str(m.get("content", ""))) for m in messages) // 4
-        warning = ("\n\nThe budget is almost exhausted (about 80%). Finish the task now: do "
-                   "not start any large new piece of work.") if used >= token_budget * .8 else ""
+        # The budget pressure is about the context window, not about the answer
+        # budget: comparing the whole conversation with max_tokens made the agent
+        # "hurry" from the very first step as soon as one search result came in.
+        # Only a genuinely overflowing context triggers the hint now.
+        context_chars = sum(len(str(m.get("content", ""))) for m in messages)
+        warning = ("\n\nThe context is getting long. Finish the task now: summarise what is "
+                   "already confirmed and do not start any large new piece of work."
+                   if context_chars > max(60000, token_budget * 12) else "")
         if offline_action is not None:
             response, meta = json.dumps(offline_action, ensure_ascii=False), (
                 {"forced_search": True} if forced_search else {"offline_action": True})
@@ -381,21 +608,27 @@ def run_react(ctx: AgentContext) -> AgentResult:
             response, meta = offline_answer, {"model": ctx.model or "nova-local-1"}
             offline_answer = ""
         else:
-            try:
-                response, meta = ctx.complete(
-                    messages, provider=ctx.provider, model=ctx.model,
-                    system=_system_prompt() + warning, temperature=0.2,
-                    max_tokens=token_budget, timeout=max(.2, min(45.0, deadline - ctx.clock())),
-                    tools=None if force_final_response else schemas or None,
-                )
-            except Exception as error:
-                response, meta = None, f"{type(error).__name__}: {error}"
+            response, meta = _complete_once(ctx, messages, warning, token_budget, deadline,
+                                            None if force_final_response else schemas or None)
         if response is None:
-            failure_note = "Продолжение не удалось получить; ответ выше может быть неполным."
-            fallback = ((answer_prefix + "\n\n" + failure_note) if answer_prefix else
-                        "Не удалось получить ответ модели. Выполненные действия сохранены; "
-                        "продолжить сейчас не удалось. Причина: " + str(meta or "ошибка провайдера")[:400])
-            status = "provider_error"
+            # Провайдер не ответил. Если инструменты уже успели вернуть данные
+            # (поиск нашёл источники, команда выполнилась), не выбрасываем их:
+            # отвечаем честной сводкой вместо «Не удалось получить ответ модели».
+            evidence = _evidence_answer(ctx.goal, observations, str(meta or ""))
+            if evidence:
+                fallback = evidence
+                status = "degraded"
+            else:
+                failure_note = "Продолжение не удалось получить; ответ выше может быть неполным."
+                if answer_prefix:
+                    fallback = answer_prefix + "\n\n" + failure_note
+                else:
+                    # The prefix string is asserted by the existing suite and by
+                    # the UI ("Повторить" hint); keep it verbatim, add the reason.
+                    fallback = ("Не удалось получить ответ модели. Выполненные действия сохранены; "
+                                "продолжить сейчас не удалось. Причина: "
+                                + str(meta or "ошибка провайдера")[:400])
+                status = "provider_error"
             break
         if ctx.cancel and ctx.cancel.is_set():
             fallback = "Работа остановлена по запросу пользователя. Текущий вызов модели завершился, новые действия не выполнялись."
@@ -412,11 +645,12 @@ def run_react(ctx: AgentContext) -> AgentResult:
             raw_name = str(call.get("tool") or "")
             raw_args = call.get("arguments") if isinstance(call.get("arguments"), dict) else {}
             target = mcp_aliases.get(raw_name)
+            call_id = call.get("id") or ""
             if target:
                 # Native function name from the dynamically discovered MCP schema.
-                canonical_calls.append({"tool": "mcp_call", "arguments": {
+                canonical = {"tool": "mcp_call", "arguments": {
                     "server_id": target["server_id"], "tool": target["tool"],
-                    "arguments": raw_args}})
+                    "arguments": raw_args}}
             elif raw_name == "mcp_call":
                 # Accept both established and explicit tool_name argument spellings.
                 tool_name = str(raw_args.get("tool") or raw_args.get("tool_name") or "")
@@ -432,14 +666,23 @@ def run_react(ctx: AgentContext) -> AgentResult:
                     raw_args["tool"] = tool_name
                 if server_id:
                     raw_args["server_id"] = server_id
-                canonical_calls.append({"tool": raw_name, "arguments": raw_args})
+                canonical = {"tool": raw_name, "arguments": raw_args}
             else:
-                canonical_calls.append(call)
+                canonical = call
+            if call_id:
+                canonical["id"] = call_id
+            canonical_calls.append(canonical)
         calls = canonical_calls
         if force_final_response and calls:
+            # The loop already decided that tools are not allowed any more. If the
+            # model still answers with a call and no prose, do not emit a bare
+            # «Не удалось продолжить»: build the answer from real observations.
             calls = []
             if not text.strip():
-                text = "Не удалось продолжить: повторные вызовы инструмента завершились ошибкой."
+                text = _evidence_answer(ctx.goal, observations) or (
+                    "Инструменты больше недоступны в этом запуске: "
+                    "повторные вызовы завершались ошибкой. "
+                    "Ниже — что уже удалось получить.")
         if not calls:
             from .output import (append_continuation, clean_final_answer,
                                  is_truncated_answer, partial_answer_prefix,
@@ -562,6 +805,9 @@ def run_react(ctx: AgentContext) -> AgentResult:
                 status = "cancelled"
                 break
             name = call.get("tool", "")
+            # Provider id of a native function call; used for the observation so
+            # OpenAI/Gemini can pair the result with the call it answers.
+            native_call_id = str(call.get("id") or "")
             _tool_started = ctx.clock()
             args = call.get("arguments")
             if not isinstance(args, dict):
@@ -627,6 +873,7 @@ def run_react(ctx: AgentContext) -> AgentResult:
                              and key not in mcp_succeeded
                              and mcp_attempts.get(key, 0) < repeat_limit)
                 if repeated and not retry_mcp and call_index not in parallel_results:
+                    repeat_strikes += 1
                     reason = (f"The MCP repeat limit ({repeat_limit}) was reached; the call did not run."
                               if name == "mcp_call" else
                               "An identical call already ran without new data; the repeat is blocked.")
@@ -634,9 +881,15 @@ def run_react(ctx: AgentContext) -> AgentResult:
                     if name == "mcp_call":
                         force_final_response = True
                     messages.append({"role": "user", "content": (
-                        "This tool call was not executed. Do not present it as a result. Use "
-                        "only observations from calls that really ran. If there is no data, "
-                        "say so directly and do not invent it.")})
+                        "This exact tool call was NOT executed: its result is already above in the "
+                        "conversation. Do not present it as a new result and do not repeat it. "
+                        "Either answer the user now using the observations that really ran, or "
+                        "call a different tool / a refined query if it adds new data.")})
+                    if repeat_strikes >= 2:
+                        # The model is stuck in a repeat loop. Ask for the final
+                        # answer instead of returning "повторные вызовы завершились
+                        # ошибкой" while sources are already in hand.
+                        force_final_response = True
                 else:
                     if call_index not in parallel_results:
                         seen.add(key)
@@ -684,7 +937,7 @@ def run_react(ctx: AgentContext) -> AgentResult:
             observation_limit = max(200, int(ctx.max_observation_chars))
             if name == "mcp_call":
                 observation_limit = max(observation_limit, 30000)
-            clean = json.dumps(event, ensure_ascii=False, default=str)[:observation_limit]
+            clean = _observation_json(event, observation_limit)
             observation = {"tool": name, "arguments": args, "result": event}
             observations.append(observation)
             if name == "knowledge_search" and isinstance(event.get("results"), list):
@@ -714,8 +967,22 @@ def run_react(ctx: AgentContext) -> AgentResult:
                                      "data exists."})
             from .policy import wrap_untrusted
             trusted_boundary = wrap_untrusted(name, clean)
-            messages.extend([{"role": "assistant", "content": json.dumps(call, ensure_ascii=False)},
-                             {"role": "user", "content": f"Observation from tool {name}: {trusted_boundary}"}])
+            if native_call_id:
+                # Native protocol: the assistant turn carries the exact tool_calls
+                # and the next turn is a `tool` message with the same id. Gemini
+                # needs that pair; an OpenAI-compatible server rejects a request
+                # where a tool_calls turn is followed by ordinary user text.
+                messages.extend([
+                    {"role": "assistant", "content": str(text or ""), "tool_calls": [
+                        {"id": native_call_id, "type": "function",
+                         "function": {"name": name,
+                                      "arguments": json.dumps(args, ensure_ascii=False)}}]},
+                    {"role": "tool", "tool_call_id": native_call_id, "name": name,
+                     "content": trusted_boundary},
+                ])
+            else:
+                messages.extend([{"role": "assistant", "content": json.dumps(call, ensure_ascii=False)},
+                                 {"role": "user", "content": f"Observation from tool {name}: {trusted_boundary}"}])
             tool_event = {"type": "tool", "name": name,
                           "status": "ok" if event.get("ok", False) else "error",
                           "elapsed_ms": _tool_elapsed_ms,
@@ -763,8 +1030,17 @@ def run_react(ctx: AgentContext) -> AgentResult:
             if name in {"web_search", "search"} and isinstance(event.get("results"), list):
                 sources = [dict(item) for item in event["results"] if isinstance(item, dict)
                            and item.get("url")]
-                if sources:
-                    ctx.emit({"type": "sources", "sources": sources[:12]})
+                # One search that is visible twice (for example the forced search
+                # plus the model's own identical query) used to append the same
+                # URL twice. Keep the list unique and stable for the UI.
+                fresh = []
+                for source in sources:
+                    url = str(source.get("url") or "")
+                    if url and url not in emitted_source_urls:
+                        emitted_source_urls.add(url)
+                        fresh.append(source)
+                if fresh:
+                    ctx.emit({"type": "sources", "sources": fresh[:12]})
             media_kind = event.get("kind")
             media_result = event.get("result")
             if media_kind in {"image", "audio", "video"} and isinstance(media_result, dict):

@@ -1411,6 +1411,7 @@ function createAssistantTurn(options = {}) {
         bits.push(`токенов: ${formatTokens(meta.usage.total_tokens)}`
           + ` (${formatCost(meta.usage.cost_known === false ? null : meta.usage.cost_usd)})`);
       }
+      if (meta.degraded) bits.push('без модели · данные инструментов');
       if (meta.stopped) bits.push('остановлено');
       if (sourcesData.length) bits.push(`источников: ${sourcesData.length}`);
       bits.push(`${seconds} c`);

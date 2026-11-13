@@ -1,7 +1,7 @@
 {
   "prompts": {
     "react_agent": {
-      "active": "31ab57258852",
+      "active": "698562796c76",
       "versions": [
         {
           "chars": 1614,
@@ -23,10 +23,17 @@
           "lines": 14,
           "source": "prompts/base/react_agent.txt",
           "version": "31ab57258852"
+        },
+        {
+          "chars": 2899,
+          "created_at": 1794590263.342,
+          "lines": 16,
+          "source": "prompts/base/react_agent.txt",
+          "version": "698562796c76"
         }
       ]
     }
   },
-  "updated_at": 1794555053.73,
+  "updated_at": 1794590263.343,
   "version": 1
 }

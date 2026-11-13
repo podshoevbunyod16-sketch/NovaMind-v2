@@ -1145,7 +1145,7 @@ def search_pipeline(user_message, force_search=True, reasoning=False, max_pages=
 
     answer, note = yield from _pump(
         _answer_with_context(user_message, context, sources, provider, model, reasoning,
-                             history=history),
+                             history=history, pages=scraped),
         emit,
     )
     if note:
@@ -1209,15 +1209,21 @@ def _stream_answer(messages, system, provider, model, reasoning=False, timeout=N
     return failure, "".join(pieces).strip()
 
 
-def _fallback_answer(user_message, sources, reason=""):
-    """Ответ без модели: найденные ссылки и выдержки — чтобы данные не потерялись."""
+def _fallback_answer(user_message, sources, reason="", pages=None):
+    """Ответ без модели: найденные ссылки, выдержки и прочитанный текст страниц.
+
+    Раньше выдержки были по 320 символов и сводки по данным из источников не
+    было вовсе: пользователь видел «модель не ответила» и список ссылок, то есть
+    поиск данные нашёл, а ответа фактически нет. Теперь в ответ попадают
+    абзацы с прочитанных страниц, а при их отсутствии — выдержки поиска.
+    """
     if not sources:
         return ("**Модель не ответила.** "
                 + (f"Причина: {reason}. " if reason else "")
                 + "Попробуйте спросить ещё раз или сформулировать вопрос иначе.")
 
     lines = [
-        "**Модель не ответила по этим источникам** — ниже то, что нашёл поиск.",
+        "**Модель не ответила, но поиск нашёл данные** — ниже главное из источников.",
         "",
         f"Запрос: _{user_message}_",
         "",
@@ -1225,6 +1231,23 @@ def _fallback_answer(user_message, sources, reason=""):
     if reason:
         lines.append(f"_Причина: {reason}_")
         lines.append("")
+    pages = [item for item in (pages or []) if isinstance(item, dict) and item.get("text")]
+    if pages:
+        lines.append("## Что в источниках")
+        lines.append("")
+        for index, page in enumerate(pages[:4], 1):
+            title = str(page.get("title") or page.get("url") or "Источник").strip()
+            body = " ".join(str(page.get("text") or "").split())
+            if len(body) > 900:
+                cut = body[:900]
+                # Обрезаем по границе предложения, чтобы не рвать слово.
+                stop = max(cut.rfind(". "), cut.rfind("! "), cut.rfind("? "))
+                body = cut[:stop + 1] if stop > 300 else cut.rstrip() + "…"
+            lines.append(f"**[{index}] {title}**")
+            lines.append(body)
+            lines.append("")
+    lines.append("## Источники")
+    lines.append("")
     for index, source in enumerate(sources[:6], 1):
         title = (source.get("title") or "Без названия").strip()
         url = source.get("url") or ""
@@ -1232,7 +1255,7 @@ def _fallback_answer(user_message, sources, reason=""):
         snippet = " ".join((source.get("snippet") or "").split())[:320]
         lines.append(f"**[{index}] {title}**")
         lines.append(f"{host} — {url}")
-        if snippet:
+        if snippet and not pages:
             lines.append(snippet)
         lines.append("")
     if len(sources) > 6:
@@ -1242,7 +1265,7 @@ def _fallback_answer(user_message, sources, reason=""):
 
 def _answer_with_context(user_message, context, sources, provider, model,
                          reasoning=False, system=SEARCH_SYSTEM_PROMPT, note="",
-                         history=None):
+                         history=None, pages=None):
     """Ответ модели по найденным данным — с тремя ступенями страховки.
 
     1. потоковый ответ;
@@ -1283,7 +1306,8 @@ def _answer_with_context(user_message, context, sources, provider, model,
     if isinstance(error, dict):
         error = ""
     return (_fallback_answer(user_message, sources,
-                             f"{reason}; {error or 'повтор не удался'}".strip("; ")),
+                             f"{reason}; {error or 'повтор не удался'}".strip("; "),
+                             pages=pages),
             reason)
 
 

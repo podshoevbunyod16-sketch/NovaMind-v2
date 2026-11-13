@@ -90,7 +90,13 @@ def test_max_step_budget_bounds_model_directed_search():
     assert len(result.observations) == 3
 
 
-def test_provider_failure_preserves_search_observations_for_honest_fallback():
+def test_provider_failure_after_search_answers_from_found_sources():
+    """Поиск нашёл данные, модель упала — пользователь всё равно получает ответ.
+
+    Раньше здесь возвращалось только «Не удалось получить ответ модели»: поиск
+    отработал, источники были на экране, а ответа не было. Теперь движок
+    собирает честную сводку из уже полученных наблюдений (status=degraded).
+    """
     searches = []
     replies = iter([(_call("Исмаил Сомони"), {}), (None, "provider unavailable")])
     result = _run(
@@ -100,9 +106,24 @@ def test_provider_failure_preserves_search_observations_for_honest_fallback():
         lambda *a, **k: next(replies),
     )
     assert searches == ["Исмаил Сомони"]
-    assert result.status == "provider_error"
+    assert result.status == "degraded"
     assert len(result.observations[0]["result"]["results"]) == 4
+    assert "provider unavailable" in result.answer
+    assert "https://example.test/found/0" in result.answer
+    assert "Не удалось получить ответ модели" not in result.answer
+
+
+def test_provider_failure_without_evidence_is_still_reported_honestly():
+    """Без данных поиска честное сообщение об ошибке остаётся как было."""
+    replies = iter([(None, "provider unavailable")])
+    result = _run(
+        "Найди информацию",
+        lambda query, limit=10: {"ok": True, "results": []},
+        lambda *a, **k: next(replies),
+    )
+    assert result.status == "provider_error"
     assert "Не удалось получить ответ модели" in result.answer
+    assert "provider unavailable" in result.answer
 
 
 def test_empty_search_result_is_visible_before_the_model_answers():

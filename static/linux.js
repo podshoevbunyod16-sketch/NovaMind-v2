@@ -185,9 +185,16 @@
       state.stopping = false;
       if (!turn.text) throw new Error(failure || 'ИИ не вернул ответ');
       if (typeof window.refreshUsage === 'function') window.refreshUsage(true);
+      // status=degraded — движок собрал ответ из данных, которые уже вернули
+      // инструменты, потому что модель не ответила. Это не сбой поиска и не
+      // «ИИ не работает»: показываем это в метаданных ответа.
+      if (result.status === 'degraded') {
+        turn.step('⚠️', 'Модель не ответила — ответ собран из уже найденных данных');
+      }
       turn.finish({
         model: result.model,
         provider: result.provider,
+        degraded: result.status === 'degraded',
         // Серверный id чата: по нему после перезагрузки подтягивается
         // панель «Что делал агент» из базы.
         serverChatId: result.chat_id,
