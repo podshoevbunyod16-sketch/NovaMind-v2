@@ -363,3 +363,16 @@ def stop():
     if _thread and _thread.is_alive():
         _thread.join(timeout=2)
     _thread = None
+
+
+def reset_after_fork():
+    """Сбрасывает состояние потока в дочернем процессе после fork.
+
+    Потоки не переживают fork, но объект ``Thread`` из родителя остаётся:
+    его ``is_alive()`` в ребёнке может вернуть True, и ``start()`` молча
+    ничего не сделает. Поэтому после fork состояние обнуляем и запускаем
+    планировщик заново уже в воркере.
+    """
+    global _thread
+    _thread = None
+    _stop_event.clear()

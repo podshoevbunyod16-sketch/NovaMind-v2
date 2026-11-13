@@ -40,7 +40,7 @@ jobs:
       - name: Gunicorn config is valid
         run: gunicorn --check-config -c gunicorn.conf.py wsgi:application
       - name: Python launcher self-check
-        run: python scripts/serve.py --check
+        run: python app.py --check
       - name: Signature tests (receipts, council, production, trust)
         run: >-
           pytest -q tests/test_receipts.py tests/test_council.py

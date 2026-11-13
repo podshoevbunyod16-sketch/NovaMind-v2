@@ -10,6 +10,11 @@ import multiprocessing
 import os
 
 
+# Планировщик (фоновый поток) не переживает fork: приложение импортируется
+# с отложенным стартом, а поток поднимается в post_fork уже в воркере.
+os.environ.setdefault("NOVA_DEFER_SCHEDULER", "1")
+
+
 def _int(name, default):
     try:
         return int(str(os.getenv(name, default)).strip())
@@ -69,11 +74,13 @@ def post_fork(server, worker):  # noqa: D401 — хук gunicorn
                         version.__version__, version.BUILD, worker.pid, _os.getpid())
     except Exception:
         pass
-    if not preload_app:
-        return
     try:
+        import scheduler
+        # Состояние потока из master в ребёнке недостоверно — сбрасываем.
+        scheduler.reset_after_fork()
         import app as nova_app
         started = nova_app._start_scheduler()
-        server.log.info("Планировщик в воркере %s: %s", worker.pid, "запущен" if started else "выключен")
+        server.log.info("Планировщик в воркере %s: %s", worker.pid,
+                        "запущен" if started else "выключен")
     except Exception:
         server.log.exception("Не удалось запустить планировщик в воркере")

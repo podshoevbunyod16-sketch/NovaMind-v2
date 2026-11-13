@@ -22,7 +22,7 @@ Runbook для вывода NovaMind в продакшен и для ежедн�
 | Trust Center | `/trust` | Живая страница доверия: цепочка, стоимость, готовность, история советов |
 | Preflight | `scripts/preflight.py` | Проверка «можно ли деплоить» одной командой |
 | Бэкапы | `scripts/backup.py` | Согласованный снимок SQLite + экспорт квитанций |
-| Запуск на Python | `scripts/serve.py` | `python scripts/serve.py` — gunicorn через Python-API, без Docker и shell-обёрток |
+| Запуск на Python | `app.py`, `server.py` | `python app.py` — gunicorn через Python-API, без Docker и shell-обёрток |
 | Деплой на Python | `scripts/deploy.py` | venv → зависимости → preflight → бэкап → рестарт → health |
 | systemd | `scripts/install_service.py`, `deploy/` | Unit, nginx и logrotate под ваш путь и порт |
 | CI | `.github/workflows/production.yml` | Компиляция, preflight, тесты подсистем, проверка gunicorn-конфига (Docker — опционально) |
@@ -48,24 +48,30 @@ chmod 600 .env.production
 # откройте .env.production и замените ADMIN_CODE / SESSION_SECRET / RECEIPT_SECRET
 
 .venv/bin/python scripts/preflight.py        # что не так с окружением
-.venv/bin/python scripts/serve.py --check    # баннер и проверка запуска
+.venv/bin/python app.py --check              # баннер и проверка запуска
 ```
 
 ### 2.2. Запуск
 
 ```bash
-# обычный запуск в терминале
-.venv/bin/python scripts/serve.py
+# одна команда: все проверки, баннер и gunicorn — внутри неё
+.venv/bin/python app.py
 
-# или с параметрами
-.venv/bin/python scripts/serve.py --host 127.0.0.1 --port 5000 --workers 1 --threads 8
+# с параметрами
+.venv/bin/python app.py --host 127.0.0.1 --port 5000 --workers 1 --threads 8
+
+# разработка: Flask-сервер с отладкой и автоперезагрузкой
+.venv/bin/python app.py --dev
 ```
 
-`scripts/serve.py` — это не обёртка над shell-командой. Он читает `.env`,
-прогоняет те же проверки, что и приложение, печатает баннер (версия, база,
-модели, квитанции) и поднимает gunicorn через `gunicorn.app.base.BaseApplication`.
+`app.py` — единственная точка входа. При запуске он читает `.env`, прогоняет
+проверки окружения, печатает баннер (версия, база, модели, квитанции) и
+поднимает gunicorn через `gunicorn.app.base.BaseApplication`; планировщик
+стартует в воркере после fork. `--check` показывает баннер и выходит,
+`--flask`/`--dev` поднимают встроенный сервер Flask (только для разработки).
 `Ctrl+C` — мягкая остановка: текущие стримы доживают, `/readyz` сразу
-показывает «не готов».
+показывает «не готов». Старая команда `python scripts/serve.py` оставлена как
+тонкая обёртка и делает ровно то же самое.
 
 Проверка:
 
@@ -91,7 +97,7 @@ journalctl -u novamind -f
 ```
 
 Внутри unit: `User`, `WorkingDirectory`, `EnvironmentFile=.env.production`,
-`ExecStart=.venv/bin/python scripts/serve.py`, `Restart=always`,
+`ExecStart=.venv/bin/python app.py`, `Restart=always`,
 `KillSignal=SIGTERM`, `TimeoutStopSec=45`, `ReadWritePaths` только на папку
 приложения. Если база вынесена (`NOVA_DB_PATH=/data/...`), добавьте `/data`
 в `ReadWritePaths` (подсказка есть в комментарии unit-файла).
@@ -431,7 +437,7 @@ git checkout <prev-commit>
 
 ```bash
 python scripts/preflight.py --json        # машинный отчёт
-python scripts/serve.py --check           # баннер + проверка запуска
+python app.py --check                     # баннер + проверка запуска
 journalctl -u novamind -n 80 --no-pager   # логи systemd-сервиса
 python -m receipts verify                 # целостность цепочки
 tail -f /var/log/novamind.log | jq .      # при NOVA_LOG_JSON=1

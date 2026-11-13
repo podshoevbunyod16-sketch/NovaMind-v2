@@ -23,8 +23,8 @@ WorkingDirectory=__APP_DIR__
 EnvironmentFile=-__APP_DIR__/.env.production
 Environment=NOVA_ENV=production
 Environment=PORT=__PORT__
-# Запуск без Docker и без shell: интерпретатор venv + наш Python-лаунчер.
-ExecStart=__PYTHON__ __APP_DIR__/scripts/serve.py --host 127.0.0.1 --port __PORT__
+# Запуск без Docker и без shell: интерпретатор venv + python app.py.
+ExecStart=__PYTHON__ __APP_DIR__/app.py --host 127.0.0.1 --port __PORT__
 
 Restart=always
 RestartSec=3

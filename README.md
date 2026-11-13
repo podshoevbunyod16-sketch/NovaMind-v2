@@ -56,7 +56,7 @@
 | Строгая проверка окружения (в проде не стартует с дефолтными секретами) | `production.py` |
 | `/healthz`, `/readyz`, `/version`, Prometheus `/metrics` | `production.py` |
 | Security-заголовки, request id, access-лог | `production.py` |
-| Запуск на чистом Python (gunicorn через API, без Docker) | `scripts/serve.py` |
+| Запуск на чистом Python (gunicorn через API, без Docker) | `python app.py` |
 | Деплой одной командой: venv → preflight → бэкап → рестарт → health | `scripts/deploy.py` |
 | Unit, nginx и logrotate под ваш путь | `scripts/install_service.py`, `deploy/` |
 | Docker-образ и compose (опционально) | `Dockerfile`, `docker-compose.yml` |
@@ -69,7 +69,7 @@
 python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 cp .env.production.example .env.production   # заменить секреты
 .venv/bin/python scripts/preflight.py
-.venv/bin/python scripts/serve.py           # gunicorn, без Docker
+.venv/bin/python app.py                     # gunicorn, без Docker
 
 # автозапуск: unit генерируется под ваш путь
 .venv/bin/python scripts/install_service.py --app-dir /opt/novamind
@@ -155,12 +155,20 @@ python app.py
 
 ### 3️⃣ Первый запуск
 
-После выполнения команды `python app.py` увидишь:
+После выполнения команды `python app.py` увидишь баннер и строки gunicorn:
 
 ```
- * Running on http://127.0.0.1:5000
- * Press CTRL+C to quit
+  NovaMind 3.0.0 · Khirad · сборка …
+  окружение   development
+  …
+  gunicorn → http://0.0.0.0:5000 · 1×8 (gthread) · timeout 180s
+[INFO] Listening at: http://0.0.0.0:5000
+[INFO] Booting worker with pid: …
 ```
+
+`python app.py` — это production-путь: проверки, баннер и gunicorn внутри
+одной команды. Для разработки есть `python app.py --dev` (отладка и
+автоперезагрузка), для проверки окружения — `python app.py --check`.
 
 Открой браузер и перейди на **http://localhost:5000** или **http://127.0.0.1:5000**
 (адрес берётся из `SITE_URL` в `.env`, по умолчанию — `http://localhost:5000`)
@@ -494,7 +502,12 @@ app.route('/api/my-command', methods=['POST'])(my_command.execute)
 ### Запуск в режиме отладки
 
 ```bash
-export FLASK_ENV=development
+python app.py --dev        # Flask + отладка + автоперезагрузка
+```
+
+То же самое через переменные окружения (совместимость):
+
+```bash
 export FLASK_DEBUG=True
 python app.py
 ```

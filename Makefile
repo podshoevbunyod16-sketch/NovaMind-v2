@@ -10,6 +10,8 @@ PORT ?= 5000
 .PHONY: help install dev run test test-fast compile preflight prod \
         receipts verify-council docker-build docker-run compose-up backup clean
 
+.DEFAULT_GOAL := help
+
 help:            ## Показать команды
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
 		| awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-16s\033[0m %s\n", $$1, $$2}'
@@ -20,13 +22,13 @@ install:         ## Создать venv и поставить зависимос
 	$(BIN)/pip install -r requirements-dev.txt
 
 dev:             ## Запустить dev-сервер с автоперезагрузкой
-	FLASK_DEBUG=true $(BIN)/python app.py
+	$(BIN)/python app.py --dev
 
-serve:           ## Production-сервер на Python (gunicorn через scripts/serve.py)
-	$(BIN)/python scripts/serve.py
+serve:           ## Production-сервер: gunicorn поднимается из app.py
+	$(BIN)/python app.py
 
 check:           ## Проверить окружение и показать баннер запуска
-	$(BIN)/python scripts/serve.py --check
+	$(BIN)/python app.py --check
 
 run:             ## То же через gunicorn напрямую (конфиг в gunicorn.conf.py)
 	$(BIN)/gunicorn -c gunicorn.conf.py wsgi:application
@@ -51,7 +53,7 @@ preflight:       ## Проверка окружения перед деплое�
 	$(BIN)/python scripts/preflight.py
 
 prod:            ## production-режим локально (строгие проверки)
-	NOVA_ENV=production $(BIN)/python scripts/serve.py
+	NOVA_ENV=production $(BIN)/python app.py
 
 receipts:        ## Проверить цепочку квитанций
 	$(BIN)/python -m receipts verify

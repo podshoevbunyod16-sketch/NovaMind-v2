@@ -38,7 +38,20 @@ for bp in ALL_BLUEPRINTS:
 # здоровье /healthz и /readyz, /version и Prometheus /metrics.
 import production  # noqa: E402 — после регистрации маршрутов
 production.install(app)
-production.enforce_startup()
+try:
+    production.enforce_startup()
+except RuntimeError as startup_error:
+    # При импорте (wsgi/gunicorn/тесты) пусть падает как раньше — это
+    # осознанная защита от production-конфигурации с дырами.
+    if __name__ != "__main__":
+        raise
+    # А из `python app.py` показываем баннер с проблемой, без traceback.
+    from server import check as startup_check
+    code = startup_check()
+    if code == 0:
+        print(startup_error, file=sys.stderr)
+        code = 1
+    raise SystemExit(code)
 
 # ---------- Инициализация ----------
 init_db()
@@ -69,7 +82,11 @@ def _start_scheduler():
         return False
 
 
-_start_scheduler()
+# При запуске через ``python app.py`` планировщик поднимается в воркере
+# сервера (см. server.py): поток, созданный до fork, в дочернем процессе
+# не живёт. При импорте как модуля (gunicorn/wsgi/тесты) — стартуем сразу.
+if __name__ != "__main__" and os.getenv("NOVA_DEFER_SCHEDULER") != "1":
+    _start_scheduler()
 
 # ---------- Идентичность браузера ----------
 @app.before_request
@@ -113,12 +130,15 @@ def agent_run():
     return jsonify({"output": {"answer": answer, "source": "novamind-v2"}})
 
 # ========== ЗАПУСК ==========
+# Одна команда на всё: python app.py.
+#   python app.py            — production-сервер (gunicorn через Python-API)
+#   python app.py --dev      — Flask dev-сервер с отладкой
+#   python app.py --check    — только проверка окружения
 if __name__ == '__main__':
-    port = PORT
-    debug = os.getenv("FLASK_DEBUG", "false").lower() == "true"
-    logging.getLogger(__name__).info("Запуск NovaMind на порту %s, debug=%s", port, debug)
+    logging.getLogger(__name__).info("Запуск NovaMind, порт по умолчанию %s", PORT)
     if ADMIN_CODE_IS_DEFAULT:
         logging.getLogger(__name__).warning(
             "ADMIN_CODE не задан — сгенерирован одноразовый код администратора: %s "
             "(задайте ADMIN_CODE в .env, чтобы код был постоянным)", ADMIN_CODE)
-    app.run(host="0.0.0.0", port=port, debug=debug)
+    from server import main as run_server
+    raise SystemExit(run_server(app))

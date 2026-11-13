@@ -1,7 +1,8 @@
-"""Тесты Python-деплоя: лаунчер gunicorn, деплой-план, systemd-шаблоны.
+"""Тесты Python-деплоя: единая точка входа, деплой-план, systemd-шаблоны.
 
 Docker в проекте не обязателен, поэтому production-путь должен проверяться
-без него: `scripts/serve.py`, `scripts/deploy.py`, `scripts/install_service.py`.
+без него: `python app.py` (логика в `server.py`), `scripts/deploy.py`,
+`scripts/install_service.py`. `scripts/serve.py` остаётся тонкой обёрткой.
 """
 import importlib.util
 import os
@@ -29,6 +30,11 @@ def serve():
 
 
 @pytest.fixture(scope="module")
+def server():
+    return _load("nova_server", "server.py")
+
+
+@pytest.fixture(scope="module")
 def deploy():
     return _load("nova_deploy", "scripts/deploy.py")
 
@@ -43,7 +49,57 @@ def gunicorn_conf():
     return _load("nova_gunicorn_conf", "gunicorn.conf.py")
 
 
-# ── scripts/serve.py ────────────────────────────────────────────────────
+# ── server.py / app.py — единая точка входа ─────────────────────────────
+def test_app_py_delegates_to_server():
+    text = open(os.path.join(ROOT, "app.py"), encoding="utf-8").read()
+    assert "from server import main as run_server" in text
+    assert "run_server(app)" in text
+    # сервер не должен стартовать при импорте: только под __main__
+    tail = text[text.index('if __name__ == \'__main__\''):]
+    assert "app.run(" not in tail
+
+
+def test_runtime_mode_selects_flask_for_dev(server, monkeypatch):
+    monkeypatch.delenv("FLASK_DEBUG", raising=False)
+    assert server.runtime_mode() == "gunicorn"
+    assert server.runtime_mode(dev=True) == "flask"
+    assert server.runtime_mode(flask=True) == "flask"
+    assert server.runtime_mode(debug_env="true") == "flask"
+    assert server.runtime_mode(debug_env="0") == "gunicorn"
+
+
+def _flask_app():
+    import app as flask_app
+    return flask_app.app
+
+
+def test_server_check_passes_in_development(server, monkeypatch):
+    monkeypatch.setenv("NOVA_ENV", "development")
+    assert server.main(_flask_app(), ["--check"]) == 0
+
+
+def test_server_check_fails_without_admin_code_in_production(server, monkeypatch):
+    monkeypatch.delenv("ADMIN_CODE", raising=False)
+    monkeypatch.setenv("NOVA_ENV", "production")
+    assert server.main(_flask_app(), ["--check"]) == 1
+
+
+def test_scheduler_reset_after_fork():
+    import scheduler
+    scheduler._thread = None
+    scheduler._stop_event.set()
+    scheduler.reset_after_fork()
+    assert scheduler._thread is None
+    assert not scheduler._stop_event.is_set()
+
+
+def test_gunicorn_post_fork_restarts_scheduler():
+    text = open(os.path.join(ROOT, "gunicorn.conf.py"), encoding="utf-8").read()
+    assert "reset_after_fork()" in text
+    assert "NOVA_DEFER_SCHEDULER" in text
+
+
+# ── scripts/serve.py (совместимость) ────────────────────────────────────
 def test_build_options_defaults(serve):
     options = serve.build_options(port=8080, workers=2, threads=4)
     assert options["bind"].endswith(":8080")
@@ -142,7 +198,8 @@ def test_render_unit_replaces_every_marker(service, tmp_path):
         port=8080, python=str(tmp_path / ".venv" / "bin" / "python"))
     assert "__APP_DIR__" not in unit
     assert "__PORT__" not in unit
-    assert "scripts/serve.py" in unit
+    assert "app.py" in unit
+    assert "scripts/serve.py" not in unit
     assert "--port 8080" in unit
     assert "User=novamind" in unit
     assert "Environment=NOVA_ENV=production" in unit

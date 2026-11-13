@@ -2,6 +2,11 @@
 
 Самый быстрый способ запустить приложение.
 
+> `python app.py` — одна команда на всё: проверки окружения, баннер и
+> production-сервер (gunicorn) поднимаются изнутри неё. Для разработки —
+> `python app.py --dev` (отладка и автоперезагрузка), только проверка —
+> `python app.py --check`.
+
 ---
 
 ## 🚀 Установка за 30 секунд
@@ -60,7 +65,7 @@ python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
 cp .env.production.example .env.production    # заменить секреты
 .venv/bin/python scripts/preflight.py         # проверка окружения
-.venv/bin/python scripts/serve.py             # gunicorn через Python-API
+.venv/bin/python app.py                       # gunicorn через Python-API
 ```
 
 Автозапуск (systemd) и nginx:
