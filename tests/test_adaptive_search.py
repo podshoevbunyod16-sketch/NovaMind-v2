@@ -100,9 +100,10 @@ def test_provider_failure_preserves_search_observations_for_honest_fallback():
         lambda *a, **k: next(replies),
     )
     assert searches == ["Исмаил Сомони"]
-    assert result.status == "provider_error"
+    assert result.status == "completed"
     assert len(result.observations[0]["result"]["results"]) == 4
-    assert "Не удалось получить ответ модели" in result.answer
+    assert "Модель не смогла подготовить краткую сводку" in result.answer
+    assert "https://example.test/found/0" in result.answer
 
 
 def test_empty_search_result_is_visible_before_the_model_answers():

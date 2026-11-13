@@ -199,6 +199,88 @@ def test_searxng_backend_returns_real_results(mock_search):
     assert trace[0]["backend"] == "searxng" and trace[0]["ok"] is True
 
 
+def test_searxng_mirrors_are_queried_concurrently(monkeypatch):
+    instances = ["https://mirror-a.test", "https://mirror-b.test", "https://mirror-c.test"]
+    barrier = threading.Barrier(len(instances))
+    called = []
+
+    class Response:
+        status_code = 200
+
+        def __init__(self, results):
+            self._results = results
+
+        def json(self):
+            return {"results": self._results}
+
+    def fake_get(url, **_kwargs):
+        instance = url.rsplit("/search", 1)[0]
+        called.append(instance)
+        try:
+            barrier.wait(timeout=1)
+        except threading.BrokenBarrierError as exc:
+            raise RuntimeError("SearXNG mirrors were not queried concurrently") from exc
+        results = ([{"title": "Fast result", "url": "https://example.test/result"}]
+                   if instance == instances[1] else [])
+        return Response(results)
+
+    monkeypatch.setattr(search_routes, "SEARXNG_INSTANCES", instances)
+    monkeypatch.setattr(search_routes, "SEARCH_TIMEOUT", 2.0)
+    monkeypatch.setattr(search_routes.requests, "get", fake_get)
+
+    results, error = search_routes.search_web_searxng("test query")
+
+    assert error is None
+    assert results[0]["title"] == "Fast result"
+    assert set(called) == set(instances)
+
+
+def test_searxng_mirrors_share_one_timeout_budget(monkeypatch):
+    instances = ["https://mirror-a.test", "https://mirror-b.test"]
+    barrier = threading.Barrier(len(instances))
+    release = threading.Event()
+
+    def slow_get(_url, **_kwargs):
+        barrier.wait(timeout=1)
+        release.wait(timeout=2)
+        raise RuntimeError("test request released")
+
+    monkeypatch.setattr(search_routes, "SEARXNG_INSTANCES", instances)
+    monkeypatch.setattr(search_routes, "SEARCH_TIMEOUT", 0.5)
+    monkeypatch.setattr(search_routes.requests, "get", slow_get)
+
+    try:
+        results, error = search_routes.search_web_searxng("test query")
+    finally:
+        release.set()
+
+    assert results == []
+    assert "нет ответа от инстансов за 0.5 с" in error
+
+
+def test_search_stops_after_first_backend_with_results(monkeypatch):
+    calls = []
+
+    def first_backend(_query, _num):
+        calls.append("searxng")
+        return [{"title": "First result", "url": "https://example.test/first"}], None
+
+    def later_backend(_query, _num):
+        calls.append("ddg")
+        return [{"title": "Later result", "url": "https://example.test/later"}], None
+
+    monkeypatch.setattr(search_routes, "_find_mcp_search_tool", lambda: None)
+    monkeypatch.setitem(search_routes.BACKENDS, "searxng", first_backend)
+    monkeypatch.setitem(search_routes.BACKENDS, "ddg", later_backend)
+    monkeypatch.setenv("SEARCH_BACKENDS", "searxng,ddg")
+
+    results, trace = search_routes.search_web("test query")
+
+    assert calls == ["searxng"]
+    assert [entry["backend"] for entry in trace] == ["searxng"]
+    assert results[0]["title"] == "First result"
+
+
 def test_search_falls_back_to_wikipedia(monkeypatch, upstream):
     monkeypatch.setattr(search_routes, "SEARXNG_INSTANCES", [upstream + "/broken"])
     monkeypatch.setenv("WIKI_API_BASES", upstream + "/w/api.php")

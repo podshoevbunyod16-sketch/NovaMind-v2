@@ -705,11 +705,14 @@ def free_failover_targets(provider: str | None = None, model: str | None = None)
     return [(primary_provider, primary_model)]
 
 
-def _managed_provider_request(provider, model, url, payload, headers, timeout=90):
+def _managed_provider_request(provider, model, url, payload, headers, timeout=90,
+                              max_attempts=None):
     """Rotate keys only inside the selected provider; never change provider/model."""
     manager = provider_manager()
     if provider not in manager.provider_names():
-        return openai_compatible_request(url, payload, headers, timeout=timeout)
+        retries = max(1, int(max_attempts)) if max_attempts is not None else 2
+        return openai_compatible_request(url, payload, headers, timeout=timeout,
+                                        max_retries=retries)
 
     def request_with_key(key_state):
         request_headers = dict(headers or {})
@@ -721,7 +724,8 @@ def _managed_provider_request(provider, model, url, payload, headers, timeout=90
             raise pm.ProviderError(kind, str(error), provider=provider, model=model)
         return data
 
-    data, error = manager.execute(provider, model, request_with_key)
+    data, error = manager.execute(provider, model, request_with_key,
+                                   max_attempts=max_attempts)
     return data, str(error) if error else None
 
 
@@ -789,7 +793,8 @@ def _local_request_options(model, extra=None, *, reasoning=False,
         return dict(extra or {})
 
 
-def _request_local_with_fallback(provider, model, cfg, payload, timeout):
+def _request_local_with_fallback(provider, model, cfg, payload, timeout,
+                                 max_attempts=None):
     """POST a local request; retry once without fields the server rejected.
 
     Local runtimes differ in what they implement: one llama-server build
@@ -798,7 +803,8 @@ def _request_local_with_fallback(provider, model, cfg, payload, timeout):
     field instead of failing the user's chat.
     """
     data, error = _managed_provider_request(
-        provider, model, cfg["url"], payload, provider_headers(provider), timeout=timeout)
+        provider, model, cfg["url"], payload, provider_headers(provider), timeout=timeout,
+        max_attempts=max_attempts)
     if data is not None or provider != "openai_compatible" or not error:
         return data, error, []
     fields = local_providers.rejected_fields(str(error))
@@ -807,7 +813,8 @@ def _request_local_with_fallback(provider, model, cfg, payload, timeout):
         return data, error, []
     logger.info("local server rejected optional fields %s — retrying without them", fields)
     data, retry_error = _managed_provider_request(
-        provider, model, cfg["url"], stripped, provider_headers(provider), timeout=timeout)
+        provider, model, cfg["url"], stripped, provider_headers(provider), timeout=timeout,
+        max_attempts=max_attempts)
     if data is not None:
         return data, None, fields
     return None, (retry_error or error), fields
@@ -816,7 +823,7 @@ def _request_local_with_fallback(provider, model, cfg, payload, timeout):
 def _chat_completion_once(messages, provider=None, model=None, system=None,
                           temperature=0.7, max_tokens=None, timeout=90, extra=None,
                           tools=None, tool_choice=None, json_mode=False,
-                          json_schema=None):
+                          json_schema=None, max_attempts=None):
     """
     Синхронный запрос к текущей модели.
     Возвращает (text, meta) или (None, error_string).
@@ -861,12 +868,15 @@ def _chat_completion_once(messages, provider=None, model=None, system=None,
         local_caps = local_providers.capabilities_for(str(model))
 
     if provider == "google_ai_studio":
-        data, error = gemini_request(model, payload, timeout=timeout)
+        data, error = gemini_request(model, payload, timeout=timeout,
+                                     max_retries=max_attempts or 2)
     elif provider == "groq":
-        data, error = groq_request_with_rotation(cfg["url"], payload, provider_headers("groq"), timeout=timeout)
+        data, error = groq_request_with_rotation(
+            cfg["url"], payload, provider_headers("groq"), timeout=timeout,
+            max_retries=max_attempts or 3)
     else:
         data, error, degraded = _request_local_with_fallback(
-            provider, model, cfg, payload, timeout)
+            provider, model, cfg, payload, timeout, max_attempts=max_attempts)
         if data is not None and degraded:
             local_caps = dict(local_caps or {})
             local_caps["degraded"] = degraded
@@ -907,7 +917,7 @@ def _chat_completion_once(messages, provider=None, model=None, system=None,
 def chat_completion(messages, provider=None, model=None, system=None,
                     temperature=0.7, max_tokens=None, timeout=90, extra=None,
                     tools=None, tool_choice=None, json_mode=False,
-                    json_schema=None):
+                    json_schema=None, max_attempts=None):
     """Run exactly the selected free provider/model; never fail over."""
     try:
         targets = free_failover_targets(provider, model)
@@ -920,7 +930,7 @@ def chat_completion(messages, provider=None, model=None, system=None,
         messages, provider=target_provider, model=target_model, system=system,
         temperature=temperature, max_tokens=max_tokens, timeout=timeout,
         extra=extra, tools=tools, tool_choice=tool_choice,
-        json_mode=json_mode, json_schema=json_schema,
+        json_mode=json_mode, json_schema=json_schema, max_attempts=max_attempts,
     )
     if text is None:
         return None, meta

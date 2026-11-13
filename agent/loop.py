@@ -252,10 +252,37 @@ def _offline_action_answer(goal: str, observation: dict) -> str:
     return ""
 
 
+def _search_fallback_answer(observations: list[dict]) -> str:
+    """Return clearly-labeled source excerpts when model synthesis fails."""
+    for observation in reversed(observations or []):
+        if not isinstance(observation, dict) or observation.get("tool") not in {"web_search", "search"}:
+            continue
+        result = observation.get("result") if isinstance(observation.get("result"), dict) else {}
+        items = result.get("results") if isinstance(result.get("results"), list) else []
+        items = [item for item in items if isinstance(item, dict) and item.get("url")]
+        if not items:
+            continue
+        lines = ["Модель не смогла подготовить краткую сводку; вот найденные источники:"]
+        for index, item in enumerate(items[:5], 1):
+            url = str(item.get("url") or "")[:500]
+            title = str(item.get("title") or url)[:160]
+            snippet = str(item.get("snippet") or "").strip()[:260]
+            lines.append(f"{index}. {title} — {url}" + (f"\n   {snippet}" if snippet else ""))
+        return "\n".join(lines)
+    return ""
+
+
 def run_react(ctx: AgentContext) -> AgentResult:
     """Run one task. Every non-success path still returns a user-facing answer."""
     started = ctx.clock()
     deadline = started + max(0.1, float(ctx.timeout))
+    try:
+        model_timeout = float(os.getenv("AGENT_MODEL_TIMEOUT", "25"))
+        if not model_timeout == model_timeout:  # NaN is not a usable timeout.
+            raise ValueError("AGENT_MODEL_TIMEOUT must be finite")
+        model_timeout = max(0.2, min(120.0, model_timeout))
+    except (TypeError, ValueError, OverflowError):
+        model_timeout = 25.0
     specs = _specs(ctx)
     by_name = {spec.name: spec for spec in specs}
     schemas = [_schema(spec) for spec in specs]
@@ -385,12 +412,23 @@ def run_react(ctx: AgentContext) -> AgentResult:
                 response, meta = ctx.complete(
                     messages, provider=ctx.provider, model=ctx.model,
                     system=_system_prompt() + warning, temperature=0.2,
-                    max_tokens=token_budget, timeout=max(.2, min(45.0, deadline - ctx.clock())),
+                    max_tokens=token_budget,
+                    timeout=max(.2, min(model_timeout, deadline - ctx.clock())),
+                    max_attempts=1,
                     tools=None if force_final_response else schemas or None,
                 )
             except Exception as error:
                 response, meta = None, f"{type(error).__name__}: {error}"
         if response is None:
+            source_fallback = _search_fallback_answer(observations)
+            if source_fallback:
+                import guardrails
+                verdict = guardrails.check_output(source_fallback, system_prompt=SYSTEM)
+                if verdict.changed:
+                    ctx.emit(verdict.event("output"))
+                fallback = verdict.text
+                status = "completed"
+                break
             failure_note = "Продолжение не удалось получить; ответ выше может быть неполным."
             fallback = ((answer_prefix + "\n\n" + failure_note) if answer_prefix else
                         "Не удалось получить ответ модели. Выполненные действия сохранены; "
@@ -765,6 +803,8 @@ def run_react(ctx: AgentContext) -> AgentResult:
                            and item.get("url")]
                 if sources:
                     ctx.emit({"type": "sources", "sources": sources[:12]})
+                    ctx.emit({"type": "stage", "scene": "write", "title": "Формирую ответ",
+                              "text": "Составляю краткий ответ по найденным источникам…"})
             media_kind = event.get("kind")
             media_result = event.get("result")
             if media_kind in {"image", "audio", "video"} and isinstance(media_result, dict):

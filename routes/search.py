@@ -417,8 +417,11 @@ def search_web_serper(query, num=8):
 
 
 def search_web_searxng(query, num=8):
-    last_error = "нет доступных инстансов"
-    for instance in SEARXNG_INSTANCES:
+    instances = list(SEARXNG_INSTANCES)
+    if not instances:
+        return [], "нет доступных инстансов"
+
+    def search_instance(instance):
         try:
             resp = requests.get(
                 f"{instance.rstrip('/')}/search",
@@ -428,23 +431,44 @@ def search_web_searxng(query, num=8):
                 timeout=SEARCH_TIMEOUT,
             )
         except requests.RequestException as exc:
-            last_error = f"{instance}: {exc.__class__.__name__}"
-            continue
+            return [], f"{instance}: {exc.__class__.__name__}"
         if resp.status_code != 200:
-            last_error = f"{instance}: HTTP {resp.status_code}"
-            continue
+            return [], f"{instance}: HTTP {resp.status_code}"
         try:
             data = resp.json()
         except ValueError:
-            last_error = f"{instance}: ответ не JSON"
-            continue
+            return [], f"{instance}: ответ не JSON"
+        raw_results = data.get("results", []) if isinstance(data, dict) else []
         results = [_norm_result(r.get("title"), r.get("url"),
                                 r.get("content") or r.get("snippet") or "")
-                   for r in (data.get("results") or [])[:num]]
+                   for r in raw_results[:num] if isinstance(r, dict)]
         results = [r for r in results if r["title"] and r["url"]]
         if results:
             return results, None
-        last_error = f"{instance}: пустая выдача"
+        return [], f"{instance}: пустая выдача"
+
+    # Public SearXNG instances often time out. Query them concurrently and
+    # impose one total budget so a list of mirrors cannot multiply the delay.
+    timeout = max(0.1, float(SEARCH_TIMEOUT))
+    executor = ThreadPoolExecutor(max_workers=min(8, len(instances)))
+    futures = [executor.submit(search_instance, instance) for instance in instances]
+    last_error = "нет ответа от инстансов SearXNG"
+    try:
+        for future in concurrent.futures.as_completed(futures, timeout=timeout):
+            try:
+                results, error = future.result()
+            except Exception as exc:
+                results, error = [], exc.__class__.__name__
+            if results:
+                return results, None
+            if error:
+                last_error = error
+    except concurrent.futures.TimeoutError:
+        last_error = f"нет ответа от инстансов за {timeout:g} с"
+    finally:
+        for future in futures:
+            future.cancel()
+        executor.shutdown(wait=False)
     return [], last_error
 
 
@@ -830,10 +854,9 @@ def search_web(query, num=8, backends=None, on_progress=None):
                 on_progress(entry)
             except Exception:
                 pass
-        if results and not first_results:
+        if results:
             first_results = results
-            if mcp_search_tool and results:
-                break
+            break
     return _normalize_and_rank(first_results, query, limit=num), trace
 
 # ══════════════════════════════════════════════════════════════════

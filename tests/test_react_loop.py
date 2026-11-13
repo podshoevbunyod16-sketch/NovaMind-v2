@@ -185,3 +185,36 @@ def test_tool_handler_typeerror_is_not_retried_as_a_second_call():
 
     assert calls == ["write_once"]
     assert result.observations[0]["result"]["ok"] is False
+
+
+def test_search_results_are_returned_when_synthesis_times_out(monkeypatch):
+    monkeypatch.setenv("AGENT_MODEL_TIMEOUT", "9")
+    sources = [{"title": "AI update", "url": "https://news.example/item",
+                "snippet": "A short search excerpt."}]
+    spec = ToolSpec("web_search", "Search", {"type": "object", "properties": {}},
+                    lambda **_kwargs: {"ok": True, "results": sources})
+    calls = []
+    events = []
+
+    def complete(_messages, **kwargs):
+        calls.append(kwargs)
+        return None, "timeout"
+
+    result = run_react(AgentContext(
+        "Find today's AI update", complete=complete, tools=[spec],
+        call_tool=lambda _name, **_kwargs: {"ok": True, "results": sources},
+        emit=events.append, search_requested=True, timeout=90,
+    ))
+
+    assert result.status == "completed"
+    assert "не смогла подготовить краткую сводку" in result.answer
+    assert "https://news.example/item" in result.answer
+    assert "A short search excerpt." in result.answer
+    assert len(calls) == 1
+    assert calls[0]["timeout"] <= 9
+    assert calls[0]["max_attempts"] == 1
+    source_index = next(i for i, event in enumerate(events) if event["type"] == "sources")
+    writing_index = next(i for i, event in enumerate(events)
+                         if event.get("type") == "stage" and event.get("scene") == "write")
+    token_index = next(i for i, event in enumerate(events) if event["type"] == "token")
+    assert source_index < writing_index < token_index
