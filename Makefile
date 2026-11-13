@@ -22,8 +22,20 @@ install:         ## Создать venv и поставить зависимос
 dev:             ## Запустить dev-сервер с автоперезагрузкой
 	FLASK_DEBUG=true $(BIN)/python app.py
 
-run:             ## Запустить как в проде (gunicorn)
+serve:           ## Production-сервер на Python (gunicorn через scripts/serve.py)
+	$(BIN)/python scripts/serve.py
+
+check:           ## Проверить окружение и показать баннер запуска
+	$(BIN)/python scripts/serve.py --check
+
+run:             ## То же через gunicorn напрямую (конфиг в gunicorn.conf.py)
 	$(BIN)/gunicorn -c gunicorn.conf.py wsgi:application
+
+deploy:          ## Деплой: venv, зависимости, бэкап, рестарт, health
+	$(BIN)/python scripts/deploy.py
+
+service:         ## Отрендерить systemd-unit под текущий путь
+	$(BIN)/python scripts/install_service.py
 
 test:            ## Все тесты
 	$(BIN)/python -m pytest -q
@@ -39,7 +51,7 @@ preflight:       ## Проверка окружения перед деплое�
 	$(BIN)/python scripts/preflight.py
 
 prod:            ## production-режим локально (строгие проверки)
-	NOVA_ENV=production $(BIN)/gunicorn -c gunicorn.conf.py wsgi:application
+	NOVA_ENV=production $(BIN)/python scripts/serve.py
 
 receipts:        ## Проверить цепочку квитанций
 	$(BIN)/python -m receipts verify
@@ -47,7 +59,8 @@ receipts:        ## Проверить цепочку квитанций
 backup:          ## Резервная копия данных (хранит 7 последних)
 	$(BIN)/python scripts/backup.py --keep 7
 
-docker-build:    ## Собрать production-образ
+# ── Docker — опционально, если он вообще нужен ──────────────────
+docker-build:    ## Собрать production-образ (опционально)
 	docker build -t novamind:v3 .
 
 docker-run:      ## Запустить образ с данными на томе

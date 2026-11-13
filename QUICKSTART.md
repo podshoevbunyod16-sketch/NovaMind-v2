@@ -53,6 +53,29 @@ python app.py
 
 ---
 
+## 🏭 Production на Python (без Docker)
+
+```bash
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
+cp .env.production.example .env.production    # заменить секреты
+.venv/bin/python scripts/preflight.py         # проверка окружения
+.venv/bin/python scripts/serve.py             # gunicorn через Python-API
+```
+
+Автозапуск (systemd) и nginx:
+
+```bash
+.venv/bin/python scripts/install_service.py --app-dir /opt/novamind
+# скрипт покажет команды sudo systemctl …
+```
+
+Обновление одной командой: `.venv/bin/python scripts/deploy.py`.
+Полный runbook — **[PRODUCTION.md](PRODUCTION.md)**.
+
+---
+
+
 ## 📝 Первый тест
 
 После запуска приложения (ты увидишь сообщение `Running on http://127.0.0.1:5000`):

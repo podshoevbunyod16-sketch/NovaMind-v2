@@ -32,16 +32,19 @@ keepalive = _int("WEB_KEEPALIVE", 65)       # > прокси, чтобы не р
 max_requests = _int("WEB_MAX_REQUESTS", 2000)
 max_requests_jitter = _int("WEB_MAX_REQUESTS_JITTER", 200)
 
-#: Предзагрузка экономит память, но инициализация БД/потоков должна быть
-#: безопасной до fork. У нас безопасна, поэтому по умолчанию включена.
-preload_app = os.getenv("WEB_PRELOAD", "1") == "1"
+#: Предзагрузка экономит память, но приложение запускает фоновые потоки
+#: (планировщик). Потоки не переживают fork, поэтому по умолчанию выключена:
+#: каждый воркер импортирует приложение сам и поднимает свои фоновые задачи.
+preload_app = os.getenv("WEB_PRELOAD", "0") == "1"
 
 accesslog = os.getenv("WEB_ACCESS_LOG", "-")
 errorlog = os.getenv("WEB_ERROR_LOG", "-")
 loglevel = os.getenv("WEB_LOG_LEVEL", "info")
 forwarded_allow_ips = os.getenv("WEB_FORWARDED_ALLOW_IPS", "*")
 proxy_allow_ips = os.getenv("WEB_PROXY_ALLOW_IPS", "*")
-worker_tmp_dir = os.getenv("WEB_WORKER_TMP", "/dev/shm")
+#: /dev/shm есть не везде (macOS, некоторые контейнеры) — тогда не задаём.
+_worker_tmp = os.getenv("WEB_WORKER_TMP", "/dev/shm")
+worker_tmp_dir = _worker_tmp if os.path.isdir(_worker_tmp) else None
 
 #: graceful-остановка: SIGTERM → ждём текущие запросы, потом выходим.
 def on_exit(server):  # noqa: D401 — хук gunicorn
@@ -53,7 +56,12 @@ def on_exit(server):  # noqa: D401 — хук gunicorn
 
 
 def post_fork(server, worker):  # noqa: D401 — хук gunicorn
-    """Каждый воркер пишет свой pid и версию — видно в логах платформы."""
+    """Каждый воркер пишет свой pid и версию — видно в логах платформы.
+
+    Если включена предзагрузка (`WEB_PRELOAD=1`), приложение импортировано в
+    master, а его фоновые потоки после fork отсутствуют. Поднимаем их в
+    воркере, иначе планировщик молча не работает.
+    """
     try:
         import os as _os
         import version
@@ -61,3 +69,11 @@ def post_fork(server, worker):  # noqa: D401 — хук gunicorn
                         version.__version__, version.BUILD, worker.pid, _os.getpid())
     except Exception:
         pass
+    if not preload_app:
+        return
+    try:
+        import app as nova_app
+        started = nova_app._start_scheduler()
+        server.log.info("Планировщик в воркере %s: %s", worker.pid, "запущен" if started else "выключен")
+    except Exception:
+        server.log.exception("Не удалось запустить планировщик в воркере")

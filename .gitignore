@@ -34,3 +34,7 @@ mcp_connections.json
 traces/
 knowledge.db
 evals/report.json
+
+# Сгенерированные systemd-unit и локальные данные деплоя
+deploy/*.generated
+backups/

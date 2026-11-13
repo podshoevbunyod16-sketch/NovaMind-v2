@@ -22,80 +22,140 @@ Runbook для вывода NovaMind в продакшен и для ежедн�
 | Trust Center | `/trust` | Живая страница доверия: цепочка, стоимость, готовность, история советов |
 | Preflight | `scripts/preflight.py` | Проверка «можно ли деплоить» одной командой |
 | Бэкапы | `scripts/backup.py` | Согласованный снимок SQLite + экспорт квитанций |
-| CI | `.github/workflows/production.yml` | Компиляция, preflight, тесты подсистем, сборка Docker-образа и smoke `/healthz` |
+| Запуск на Python | `scripts/serve.py` | `python scripts/serve.py` — gunicorn через Python-API, без Docker и shell-обёрток |
+| Деплой на Python | `scripts/deploy.py` | venv → зависимости → preflight → бэкап → рестарт → health |
+| systemd | `scripts/install_service.py`, `deploy/` | Unit, nginx и logrotate под ваш путь и порт |
+| CI | `.github/workflows/production.yml` | Компиляция, preflight, тесты подсистем, проверка gunicorn-конфига (Docker — опционально) |
 
 ---
 
-## 2. Быстрый старт
+## 2. Быстрый старт (Python)
 
-### 2.1. Docker (рекомендуется)
+Docker не обязателен. Всё, что нужно, — Python 3.10+ и pip; gunicorn уже есть
+в `requirements.txt`. Ниже — основной путь, Docker вынесен в конец как опция.
+
+### 2.1. Один раз на сервере
 
 ```bash
+git clone <repo> /opt/novamind && cd /opt/novamind
+
+python3 -m venv .venv
+.venv/bin/pip install -U pip
+.venv/bin/pip install -r requirements.txt
+
 cp .env.production.example .env.production
-# откройте .env.production и замените секреты
-python scripts/preflight.py --strict     # локально, до сборки
+chmod 600 .env.production
+# откройте .env.production и замените ADMIN_CODE / SESSION_SECRET / RECEIPT_SECRET
 
-docker compose up -d --build
-docker compose logs -f
-
-curl -s http://localhost:5000/healthz
-curl -s http://localhost:5000/readyz
+.venv/bin/python scripts/preflight.py        # что не так с окружением
+.venv/bin/python scripts/serve.py --check    # баннер и проверка запуска
 ```
 
-Данные живут в томе `novamind-data` (`/data`): база, база знаний, трассы.
-Пересоздание контейнера их не трогает.
-
-### 2.2. VPS + systemd + gunicorn
-
-```ini
-# /etc/systemd/system/novamind.service
-[Unit]
-Description=NovaMind
-After=network.target
-
-[Service]
-Type=simple
-User=novamind
-WorkingDirectory=/opt/novamind
-EnvironmentFile=/opt/novamind/.env.production
-ExecStart=/opt/novamind/.venv/bin/gunicorn -c gunicorn.conf.py wsgi:application
-Restart=always
-RestartSec=3
-# Мягкая остановка: gunicorn даёт дожить текущим стримам агента.
-KillSignal=SIGTERM
-TimeoutStopSec=40
-
-[Install]
-WantedBy=multi-user.target
-```
+### 2.2. Запуск
 
 ```bash
+# обычный запуск в терминале
+.venv/bin/python scripts/serve.py
+
+# или с параметрами
+.venv/bin/python scripts/serve.py --host 127.0.0.1 --port 5000 --workers 1 --threads 8
+```
+
+`scripts/serve.py` — это не обёртка над shell-командой. Он читает `.env`,
+прогоняет те же проверки, что и приложение, печатает баннер (версия, база,
+модели, квитанции) и поднимает gunicorn через `gunicorn.app.base.BaseApplication`.
+`Ctrl+C` — мягкая остановка: текущие стримы доживают, `/readyz` сразу
+показывает «не готов».
+
+Проверка:
+
+```bash
+curl -s http://127.0.0.1:5000/healthz
+curl -s http://127.0.0.1:5000/readyz
+curl -s http://127.0.0.1:5000/version
+```
+
+### 2.3. systemd: автозапуск и перезапуск
+
+Unit генерируется под ваш путь и пользователя — не редактируйте шаблон руками:
+
+```bash
+.venv/bin/python scripts/install_service.py --app-dir /opt/novamind --port 5000
+# скрипт покажет готовые команды, выполните их:
+sudo cp deploy/novamind.service.generated /etc/systemd/system/novamind.service
 sudo systemctl daemon-reload
 sudo systemctl enable --now novamind
-sudo systemctl status novamind
+
+systemctl status novamind
+journalctl -u novamind -f
 ```
 
-Прокси (nginx) должен передавать `X-Forwarded-For`/`X-Forwarded-Proto`
-и **не буферизовать** NDJSON-стримы:
+Внутри unit: `User`, `WorkingDirectory`, `EnvironmentFile=.env.production`,
+`ExecStart=.venv/bin/python scripts/serve.py`, `Restart=always`,
+`KillSignal=SIGTERM`, `TimeoutStopSec=45`, `ReadWritePaths` только на папку
+приложения. Если база вынесена (`NOVA_DB_PATH=/data/...`), добавьте `/data`
+в `ReadWritePaths` (подсказка есть в комментарии unit-файла).
 
-```nginx
-location / {
-    proxy_pass http://127.0.0.1:5000;
-    proxy_http_version 1.1;
-    proxy_set_header Host $host;
-    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-    proxy_set_header X-Forwarded-Proto $scheme;
-    proxy_buffering off;          # стримы чата и агента
-    proxy_read_timeout 300s;
-}
+Готовые шаблоны лежат в `deploy/`:
+
+| Файл | Что это |
+|---|---|
+| `deploy/novamind.service` | шаблон unit с маркерами `__APP_DIR__`, `__USER__`, `__PORT__` |
+| `deploy/nginx.conf` | reverse proxy: TLS, `proxy_buffering off` для NDJSON-стримов, статика |
+| `deploy/logrotate.conf` | ротация `*.log`, если пишете не только в journald |
+
+### 2.4. nginx
+
+```bash
+sudo cp deploy/nginx.conf /etc/nginx/sites-available/novamind
+sudo ln -s /etc/nginx/sites-available/novamind /etc/nginx/sites-enabled/
+sudo nginx -t && sudo systemctl reload nginx
 ```
 
-### 2.3. Render / аналоги
+Обязательно оставьте `proxy_buffering off`: без него ответы чата и агента
+«зависают» до конца генерации. В `.env.production` задайте
+`TRUST_PROXY=1` и `SITE_URL=https://ваш-домен`.
+
+### 2.5. Обновление одной командой
+
+```bash
+cd /opt/novamind
+git pull --ff-only
+.venv/bin/python scripts/deploy.py
+```
+
+`scripts/deploy.py` по шагам: обновит pip и зависимости в `.venv`, прогонит
+preflight (критичные проблемы остановят деплой), сделает бэкап базы и
+квитанций, перезапустит `novamind` через systemd (если хватает прав; иначе
+напечатает `sudo systemctl restart novamind`) и дождётся `/healthz` + `/readyz`.
+
+Полезные режимы:
+
+```bash
+.venv/bin/python scripts/deploy.py --check     # только план и проверки
+.venv/bin/python scripts/deploy.py --dry-run   # показать команды, ничего не менять
+.venv/bin/python scripts/deploy.py --no-restart --no-backup
+```
+
+### 2.6. Render / PaaS
 
 `render.yaml` уже содержит web-сервис. Добавьте переменные из
 `.env.production.example` в панели, health-check path — `/healthz`,
 start command — `gunicorn -c gunicorn.conf.py wsgi:application`.
 Диск подключите в `/data` и задайте `NOVA_DB_PATH=/data/novamind_chats.db`.
+
+### 2.7. Docker (опция, если он вам действительно нужен)
+
+```bash
+cp .env.production.example .env.production
+python scripts/preflight.py --strict
+docker compose up -d --build
+docker compose logs -f
+```
+
+Данные живут в томе `novamind-data` (`/data`). Этот путь полностью
+дублирует Python-вариант: те же `production.py`, `/healthz`, `/readyz`,
+`/metrics`. Для локальной разработки на Python Docker не требуется вообще.
 
 ---
 
@@ -338,17 +398,13 @@ Cron:
 ## 10. Обновление и откат
 
 ```bash
-# обновление
+# обновление (один шаг: зависимости → preflight → бэкап → рестарт → health)
 git pull --ff-only
-.venv/bin/pip install -r requirements.txt
-.venv/bin/python scripts/preflight.py
-sudo systemctl restart novamind
-curl -fsS localhost:5000/readyz
+.venv/bin/python scripts/deploy.py
 
 # откат
 git checkout <prev-commit>
-.venv/bin/pip install -r requirements.txt
-sudo systemctl restart novamind
+.venv/bin/python scripts/deploy.py --no-backup
 ```
 
 Миграции схемы аддитивные (`CREATE TABLE IF NOT EXISTS` + `_ensure_column`),
@@ -375,6 +431,8 @@ sudo systemctl restart novamind
 
 ```bash
 python scripts/preflight.py --json        # машинный отчёт
+python scripts/serve.py --check           # баннер + проверка запуска
+journalctl -u novamind -n 80 --no-pager   # логи systemd-сервиса
 python -m receipts verify                 # целостность цепочки
 tail -f /var/log/novamind.log | jq .      # при NOVA_LOG_JSON=1
 curl -s localhost:5000/api/ops/health     # подсистемы приложения

@@ -56,17 +56,23 @@
 | Строгая проверка окружения (в проде не стартует с дефолтными секретами) | `production.py` |
 | `/healthz`, `/readyz`, `/version`, Prometheus `/metrics` | `production.py` |
 | Security-заголовки, request id, access-лог | `production.py` |
-| Docker-образ и compose с томом данных | `Dockerfile`, `docker-compose.yml` |
+| Запуск на чистом Python (gunicorn через API, без Docker) | `scripts/serve.py` |
+| Деплой одной командой: venv → preflight → бэкап → рестарт → health | `scripts/deploy.py` |
+| Unit, nginx и logrotate под ваш путь | `scripts/install_service.py`, `deploy/` |
+| Docker-образ и compose (опционально) | `Dockerfile`, `docker-compose.yml` |
 | Gunicorn под стримы агента | `gunicorn.conf.py`, `wsgi.py` |
 | Preflight и бэкапы | `scripts/preflight.py`, `scripts/backup.py` |
 | CI: preflight, тесты подсистем, сборка образа | `.github/workflows/production.yml` |
 | Runbook, алерты, масштабирование, диагностика | **[PRODUCTION.md](PRODUCTION.md)** |
 
 ```bash
-cp .env.production.example .env.production
-python scripts/preflight.py --strict
-docker compose up -d --build
-curl -s localhost:5000/readyz
+python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+cp .env.production.example .env.production   # заменить секреты
+.venv/bin/python scripts/preflight.py
+.venv/bin/python scripts/serve.py           # gunicorn, без Docker
+
+# автозапуск: unit генерируется под ваш путь
+.venv/bin/python scripts/install_service.py --app-dir /opt/novamind
 ```
 
 ## ✨ Основные возможности

@@ -37,12 +37,19 @@ jobs:
           for item in report['checks']:
               print(f"  [{item['level']}] {item['key']}: {item['message']}")
           PY
+      - name: Gunicorn config is valid
+        run: gunicorn --check-config -c gunicorn.conf.py wsgi:application
+      - name: Python launcher self-check
+        run: python scripts/serve.py --check
       - name: Signature tests (receipts, council, production, trust)
         run: >-
           pytest -q tests/test_receipts.py tests/test_council.py
           tests/test_production.py tests/test_trust_center.py
+          tests/test_python_deploy.py
       - name: Receipt chain self-check
         run: python -m receipts verify
+      - name: systemd unit renders
+        run: python scripts/install_service.py --app-dir "$PWD" --port 5000
       - name: Upload preflight report
         if: always()
         uses: actions/upload-artifact@v4
@@ -52,7 +59,9 @@ jobs:
           if-no-files-found: ignore
 
   docker:
-    name: Docker image builds
+    name: Docker image builds (optional)
+    # Docker — не основной путь; образ собираем только по ручному запуску.
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     needs: gate
     steps:

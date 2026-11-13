@@ -1,0 +1,45 @@
+# ══════════════════════════════════════════════════════════════════
+# NovaMind · systemd unit (шаблон)
+# ──────────────────────────────────────────────────────────────────
+# Не редактируйте этот файл вручную: подставьте свои пути командой
+#
+#   python scripts/install_service.py --app-dir /opt/novamind
+#
+# Она отрендерит unit в deploy/novamind.service.generated и покажет
+# команды установки. Маркеры __LIKE_THIS__ заменяются автоматически.
+# ══════════════════════════════════════════════════════════════════
+[Unit]
+Description=NovaMind — AI assistant (Khirad)
+Documentation=file://__APP_DIR__/PRODUCTION.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=__USER__
+Group=__GROUP__
+WorkingDirectory=__APP_DIR__
+# Файл с секретами; префикс «-» разрешает запуск без него (dev-проверка).
+EnvironmentFile=-__APP_DIR__/.env.production
+Environment=NOVA_ENV=production
+Environment=PORT=__PORT__
+# Запуск без Docker и без shell: интерпретатор venv + наш Python-лаунчер.
+ExecStart=__PYTHON__ __APP_DIR__/scripts/serve.py --host 127.0.0.1 --port __PORT__
+
+Restart=always
+RestartSec=3
+KillSignal=SIGTERM
+TimeoutStopSec=45
+StandardOutput=journal
+StandardError=journal
+
+# Мягкая изоляция: сервис не может писать вне своей папки.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ReadWritePaths=__APP_DIR__
+# Если база вынесена на отдельный том (NOVA_DB_PATH=/data/...),
+# добавьте путь: ReadWritePaths=__APP_DIR__ /data
+
+[Install]
+WantedBy=multi-user.target
