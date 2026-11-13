@@ -1243,6 +1243,41 @@ import re
 
 # ---------- Метки провайдеров ----------
 MODEL_ERRORS: dict = {}
+# Последние x-ratelimit-* заголовки, которые вернул провайдер (по провайдеру).
+RATE_LIMITS: dict = {}
+
+
+def show_all_models() -> bool:
+    """NOVAMIND_SHOW_ALL_MODELS=1 (по умолчанию): показывать платные и бесплатные.
+    NOVAMIND_SHOW_ALL_MODELS=0: вернуть старый фильтр free-only в каталоге.
+    Failover (free_failover_targets) остаётся бесплатным в любом случае."""
+    return os.getenv("NOVAMIND_SHOW_ALL_MODELS", "1").strip() != "0"
+
+
+def _remember_rate_limits(provider, headers):
+    picked = {str(k).lower(): str(v) for k, v in (headers or {}).items()
+              if str(k).lower().startswith("x-ratelimit") or str(k).lower() == "retry-after"}
+    if picked:
+        RATE_LIMITS[provider] = {
+            "headers": picked,
+            "seen_at": datetime.now(timezone.utc).isoformat(),
+        }
+
+
+def provider_limits(provider):
+    """Лимиты провайдера для панели настроек.
+
+    Публичный /models у большинства провайдеров не отдаёт RPM/TPM вашего ключа.
+    Реальные лимиты приходят в заголовках ответов (x-ratelimit-*), поэтому
+    здесь показываем последние виденные значения и статус их наличия."""
+    seen = RATE_LIMITS.get(provider) or {}
+    return {
+        "provider": provider,
+        "live_headers": seen.get("headers", {}),
+        "seen_at": seen.get("seen_at", ""),
+        "note": ("Заголовки появятся после первого запроса к провайдеру. "
+                 "Точные лимиты аккаунта смотрите в кабинете провайдера."),
+    }
 PROVIDER_LABELS = {
     "groq":             "Groq",
     "cerebras":         "Cerebras",
@@ -1455,6 +1490,7 @@ def fetch_available_models(provider, force=False):
     for url in urls:
         try:
             resp = requests.get(url, headers=headers, timeout=8)
+            _remember_rate_limits(provider, resp.headers)
             resp.raise_for_status()
             if provider == "google_ai_studio":
                 raw = resp.json().get("models", [])
@@ -1467,7 +1503,8 @@ def fetch_available_models(provider, force=False):
                             "name": m.get("displayName") or mid,
                             "description": m.get("description", ""),
                             "context_length": m.get("inputTokenLimit", 0),
-                            "pricing": {"prompt": "0", "completion": "0"},
+                            # Цена API Google не отдаётся: не выдаём её за 0.
+                            "pricing": {},
                         }, provider))
             else:
                 raw = resp.json().get("data", resp.json().get("models", []))
@@ -1492,8 +1529,9 @@ def fetch_available_models(provider, force=False):
 
             # NovaMind text chat is free-only: paid/unknown cloud models are
             # neither shown in settings nor eligible for failover.
-            models = [item for item in models
-                      if is_free_ai_model(provider, item.get("id", ""), item)]
+            if not show_all_models():
+                models = [item for item in models
+                          if is_free_ai_model(provider, item.get("id", ""), item)]
             if models:
                 MODEL_CACHE[provider] = models
                 MODEL_ERRORS.pop(provider, None)

@@ -3,7 +3,7 @@ routes/settings.py — Настройки провайдеров и моделе
 """
 from flask import Blueprint, request, jsonify, render_template, session
 import zipfile
-from ai_providers import fetch_available_models, provider_status, PROVIDER_LABELS, MODEL_ERRORS, media_models_catalog
+from ai_providers import fetch_available_models, provider_status, PROVIDER_LABELS, MODEL_ERRORS, media_models_catalog, provider_limits
 from config import PROVIDERS, save_selected_model, current_provider, current_model, GOOGLE_CLIENT_ID
 import mcp_registry
 import skills_registry
@@ -165,6 +165,10 @@ def settings_models():
             if provider == "pollinations" and not configured else None)
     return jsonify({"provider": provider, "models": models, "configured": configured,
                     "selection_allowed": configured, "hint": hint, "error": error,
+                    "count": len(models),
+                    "free_count": sum(1 for m in models if m.get("free")),
+                    "paid_count": sum(1 for m in models if m.get("pricing_status") == "paid"),
+                    "limits": provider_limits(provider),
                     "current_model": config.current_model if provider == config.current_provider else None})
 
 @settings_bp.route('/api/settings/media-models')
