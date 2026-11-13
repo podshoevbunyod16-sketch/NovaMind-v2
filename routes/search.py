@@ -951,20 +951,21 @@ def fetch_page_text(url, max_chars=6000):
 # ПРОМПТЫ
 # ══════════════════════════════════════════════════════════════════
 
-SEARCH_SYSTEM_PROMPT = """Ты — умный поисковый ассистент NovaMind. Отвечай ПОДРОБНО и КОНКРЕТНО на русском языке.
+SEARCH_SYSTEM_PROMPT = """You are NovaMind's search assistant. Answer in DETAIL and CONCRETELY, in the language required by the ANSWER LANGUAGE directive.
 
-ПРАВИЛА:
-1. Опирайся на данные из интернета, которые идут ниже вопроса.
-2. Давай развёрнутые ответы с конкретными фактами, цифрами и датами.
-3. Если вопрос о ценах — укажи диапазон цен, год, состояние.
-4. Структурируй ответ: заголовки (##), списки (-), таблицы.
-5. Цитируй источники как [1], [2] — номера соответствуют списку источников под ответом.
-6. Если данных недостаточно — скажи, что известно, а что нет.
-7. НЕ пиши «на основе предоставленных данных невозможно ответить» — давай максимум информации.
-8. Если поиск не дал результатов — отвечай из своих знаний с пометкой (из базы знаний)."""
+RULES:
+1. Rely on the web data that follows the question.
+2. Give thorough answers with concrete facts, numbers and dates.
+3. If the question is about prices, give the price range, year and condition.
+4. Structure the answer: headings (##), bullet lists (-), tables.
+5. Cite sources as [1], [2] — the numbers match the source list under the answer.
+6. If the data is insufficient, say what is known and what is not.
+7. Never write "it is impossible to answer from the provided data" — give the maximum useful information.
+8. If the search returned nothing, answer from your own knowledge and mark it (from internal knowledge)."""
 
-DIRECT_SYSTEM_PROMPT = ("Отвечай подробно, структурированно и на русском языке. "
-                        "Давай конкретные факты, примеры и пошаговые объяснения.")
+DIRECT_SYSTEM_PROMPT = ("Answer thoroughly and in a well-structured way, in the language "
+                        "required by the ANSWER LANGUAGE directive. Give concrete facts, "
+                        "examples and step-by-step explanations.")
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -1018,18 +1019,18 @@ def _history_block(history, limit=6, clip=600):
         return ""
     recent = "\n".join(f"{item.get('role')}: {str(item.get('content'))[:clip]}"
                        for item in items[-limit:])
-    return f"Недавний разговор (контекст):\n{recent}"
+    return f"Recent conversation (context):\n{recent}"
 
 
 def build_search_query(user_message, history=None):
     """Короткий поисковый запрос из вопроса пользователя."""
     provider, model, _ = resolve_target()
     context = _history_block(history, limit=4, clip=300)
-    prompt = (f"Контекст разговора:\n{context}\n\n" if context else "") + (
-        f'Сделай из вопроса короткий поисковый запрос (до 8 слов, без кавычек и пояснений).\n'
-        f'Пиши запрос на том же языке, что и вопрос. Не переводи на английский.\n'
-        f'Если вопрос — уточнение к предыдущей реплике, включи в запрос и суть контекста.\n'
-        f'Вопрос: "{user_message}"')
+    prompt = (f"Conversation context:\n{context}\n\n" if context else "") + (
+        f'Turn the question into a short search query (up to 8 words, no quotes, no explanations).\n'
+        f'Write the query in the same language as the question. Do not translate it into English.\n'
+        f'If the question refines the previous message, include the essence of that context.\n'
+        f'Question: "{user_message}"')
     answer, error = chat_completion(
         [{"role": "user", "content": prompt}],
         provider=provider, model=model, temperature=0, max_tokens=40, timeout=QUERY_TIMEOUT,
@@ -1107,9 +1108,9 @@ def search_pipeline(user_message, force_search=True, reasoning=False, max_pages=
         answer, note = yield from _pump(
             _answer_with_context(user_message, "", [], provider, model, reasoning,
                                  history=history,
-                                 note="Поиск в интернете не дал результатов. Отвечай из своих "
-                                      "знаний с пометкой (из базы знаний) и предупреди, что "
-                                      "данные могут быть устаревшими."),
+                                 note="The web search returned nothing. Answer from your own "
+                                      "knowledge, mark it as internal knowledge and warn that "
+                                      "the data may be outdated."),
             emit,
         )
         if note:
@@ -1259,9 +1260,9 @@ def _answer_with_context(user_message, context, sources, provider, model,
     prior = _history_block(history)
     if prior:
         body += prior + "\n\n"
-    body += f"Вопрос: {user_message}\n\nДанные из интернета:\n{context}"
+    body += f"Question: {user_message}\n\nWeb data:\n{context}"
     if note:
-        body += f"\n\n[Примечание: {note}]"
+        body += f"\n\n[Note: {note}]"
 
     failure, text = yield from _stream_answer(
         [{"role": "user", "content": body}],
@@ -1383,8 +1384,9 @@ def auto_search():
         f"### [{i + 1}] {r['title']}\nURL: {r['url']}\n{r.get('snippet', '')}"
         for i, r in enumerate(results) if r.get("snippet") or r.get("url")
     )
-    prompt = (f"Вопрос: {user_message}\n\nДанные из интернета:\n{context}" if context
-              else f"{user_message}\n[Поиск не дал результатов. Отвечай из своих знаний.]")
+    prompt = (f"Question: {user_message}\n\nWeb data:\n{context}" if context
+              else f"{user_message}\n[The search returned nothing. Answer from your own "
+                   f"knowledge and mark it as such.]")
     reply, meta = chat_completion([{"role": "user", "content": prompt}],
                                   system=SEARCH_SYSTEM_PROMPT, temperature=0.3)
     if reply is None:
@@ -1413,8 +1415,9 @@ def web_search_groq():
         f"### [{i + 1}] {r['title']}\nURL: {r['url']}\n{r.get('snippet', '')}"
         for i, r in enumerate(results) if r.get("snippet") or r.get("url")
     )
-    prompt = (f"Вопрос: {user_message}\n\nРезультаты поиска:\n{context}" if context
-              else f"{user_message}\n[Поиск не дал результатов. Отвечай из своих знаний с пометкой.]")
+    prompt = (f"Question: {user_message}\n\nSearch results:\n{context}" if context
+              else f"{user_message}\n[The search returned nothing. Answer from your own "
+                   f"knowledge and mark it as internal knowledge.]")
     reply, meta = chat_completion([{"role": "user", "content": prompt}],
                                   system=SEARCH_SYSTEM_PROMPT, temperature=0.3)
     if reply is None:

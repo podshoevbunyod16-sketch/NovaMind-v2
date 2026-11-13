@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import re
 
+import language_policy
+
 _ACTION = re.compile(r"(?iu)\b(?:создай|сделай|напиши|сохрани|запусти|выполни|проверь|исправь|установи|создать|написать|запустить|проверить|build|create|write|save|run|execute|test|deploy)\b")
 _WRITE = re.compile(r"(?iu)(?:файл|отч[её]т|сайт|приложени|код|документ|запиши|сохрани|напиши|create|write|website|report|file)")
 _CHECK = re.compile(r"(?iu)(?:проверь|протестируй|тест|запусти|выполни|проверить|test|run|execute)")
@@ -33,15 +35,25 @@ def verify_task(goal: str, observations: list[dict]) -> dict:
     has_check = any(item["tool"] in check_tools for item in successful)
     missing = []
     if needs_action and not successful:
-        missing.append("успешный результат инструмента")
+        missing.append(language_policy.pick(
+            en="a successful tool result", ru="успешный результат инструмента",
+            tg="натиҷаи бомуваффақияти асбоб"))
     if needs_write and not has_write:
-        missing.append("подтверждение создания или изменения файла")
+        missing.append(language_policy.pick(
+            en="proof that the file was created or changed",
+            ru="подтверждение создания или изменения файла",
+            tg="тасдиқи сохта ё тағйир додани файл"))
     if needs_check and not has_check:
-        missing.append("результат проверки/команды")
+        missing.append(language_policy.pick(
+            en="a check or command result", ru="результат проверки/команды",
+            tg="натиҷаи санҷиш/фармон"))
     return {"verified": needs_action and not missing if needs_action else True,
             "required": needs_action, "missing": missing,
             "evidence": [{"tool": item["tool"],
-                          "summary": str(item["result"].get("result") or item["result"].get("content") or item["result"].get("output") or "успешный ответ")[:300]}
+                          "summary": str(item["result"].get("result") or item["result"].get("content") or item["result"].get("output")
+                                         or language_policy.pick(en="successful response",
+                                                                 ru="успешный ответ",
+                                                                 tg="ҷавоби бомуваффақият"))[:300]}
                          for item in successful[:12]]}
 
 
@@ -49,6 +61,12 @@ def honest_answer(goal: str, answer: str, verification: dict) -> str:
     """Prevent unsupported completion claims without masking non-success."""
     text = str(answer or "").strip()
     if verification.get("required") and not verification.get("verified") and _CLAIM.search(text):
-        missing = ", ".join(verification.get("missing") or ["доказательства"])
-        return f"Не могу честно подтвердить завершение задачи: нет {missing}.\n\n{text}"
+        missing = ", ".join(verification.get("missing") or [language_policy.pick(
+            en="evidence", ru="доказательства", tg="далелҳо")])
+        prefix = language_policy.pick(
+            en=f"I cannot honestly confirm that the task is complete: {missing} is missing.",
+            ru=f"Не могу честно подтвердить завершение задачи: нет {missing}.",
+            tg=f"Ман одилона тасдиқ карда наметавонам, ки вазифа иҷро шуд: {missing} нест.",
+        )
+        return f"{prefix}\n\n{text}"
     return text

@@ -33,38 +33,22 @@ import sys
 import time
 from datetime import datetime, timezone
 
+import offline_i18n
+
 MODEL_ID = "nova-local-1"
-MODEL_NAME = "Nova Local 1 (офлайн)"
+MODEL_NAME = "Nova Local 1 (offline)"
 PROVIDER_ID = "local_demo"
-PROVIDER_NAME = "Локальный офлайн-помощник"
+PROVIDER_NAME = "Local offline assistant"
 
-DISCLAIMER = (
-    "— офлайн-режим NovaMind: без интернета и без API-ключей. "
-    "Это детерминированный помощник, а не языковая модель."
-)
 
-_SETUP_HINT = (
-    "Чтобы получить полноценные ответы на любые вопросы, подключите модель:\n"
-    "- ключ в `.env`: `GROQ_API_KEY`, `GEMINI_API_KEY`, `OPENROUTER_API_KEY` или `CEREBRAS_API_KEY`;\n"
-    "- либо локальный сервер: `OPENAI_BASE_URL=http://127.0.0.1:8080/v1` "
-    "(llama.cpp / Ollama / LM Studio) и выберите провайдера `openai_compatible` в настройках."
-)
+def _t(key: str, **values) -> str:
+    """Text of the offline helper in the current interface language."""
+    return offline_i18n.t(key, **values)
 
-_KNOWLEDGE = {
-    "привет": "Привет! Я офлайн-помощник NovaMind. Могу посчитать, перевести единицы, "
-              "показать дату/время и обработать текст. Для ответов на общие вопросы подключите модель.",
-    "кто ты": "Я офлайн-контур NovaMind. Работаю без сети и ключей: арифметика, единицы, "
-              "дата и время, текст. Языковой моделью не являюсь.",
-    "что ты умеешь": (
-        "**Офлайн-режим умеет:**\n\n"
-        "- 🧮 арифметика и проценты: `2+2*2`, `15% от 200`\n"
-        "- 📏 единицы: `10 км в мили`, `20 C в F`, `5 кг в фунты`\n"
-        "- 🕒 дата и время: `сколько времени`, `какой сегодня день`\n"
-        "- 🔤 текст: `сколько слов в …`, `переверни …`, `base64: …`, `sha256: …`, `json: …`\n\n"
-        "Для остального нужна модель — ключ в `.env` или локальный llama-server."
-    ),
-    "помощь": "Введите `/help` — список команд чата. Офлайн-возможности: `/help` → раздел «Офлайн-режим».",
-}
+
+#: English defaults kept as module attributes for integrations that import them.
+DISCLAIMER = offline_i18n.t("disclaimer", lang="en")
+_SETUP_HINT = offline_i18n.t("setup_hint", lang="en")
 
 _NUMBER = r"[-+]?\d+(?:[.,]\d+)?"
 _MATH_CHARS = re.compile(r"^[\d\s.+\-*/%()^,]+$")
@@ -117,10 +101,11 @@ def _math_answer(text: str):
     expr = re.sub(r"^(посчитай|вычисли|сколько\s+будет|calc|compute)\s*:?\s*", "", expr, flags=re.I)
     expr = expr.replace(",", ".").replace("^", "**").replace("×", "*").replace("÷", "/")
     # «15% от 200» / «15 процентов от 200»
-    percent = re.fullmatch(rf"\s*({_NUMBER})\s*%?\s*(?:от|of)\s*({_NUMBER})\s*", expr, re.I)
+    percent = re.fullmatch(rf"\s*({_NUMBER})\s*%?\s*(?:от|of|аз)\s*({_NUMBER})\s*", expr, re.I)
     if percent:
         part, whole = float(percent.group(1)), float(percent.group(2))
-        return f"{_pretty_number(part)}% от {_pretty_number(whole)} = **{_pretty_number(part * whole / 100)}**"
+        return _t("percent_of", part=_pretty_number(part), whole=_pretty_number(whole),
+                  value=_pretty_number(part * whole / 100))
     if not re.search(r"\d", expr) or not re.search(r"[+\-*/%]", expr):
         return None
     if not _MATH_CHARS.fullmatch(expr):
@@ -206,7 +191,8 @@ def _unit_answer(text: str):
         return None
     result = value * src_info[1] / dst_info[1]
     shown = f"{result:.4f}".rstrip("0").rstrip(".") if abs(result) < 1e6 else _pretty_number(result)
-    return f"{_pretty_number(value)} {src} = **{shown} {dst}** ({src_info[0]})"
+    category = offline_i18n.unit_category(src_info[0])
+    return f"{_pretty_number(value)} {src} = **{shown} {dst}** ({category})"
 
 
 # ─────────────────────────── дата / система ───────────────────────────
@@ -226,13 +212,16 @@ def _datetime_answer(text: str):
     now_local = datetime.now().astimezone()
     now_utc = datetime.now(timezone.utc)
     if wants_time and not wants_date:
-        return (f"Сейчас **{now_local.strftime('%H:%M:%S')}** "
-                f"({now_local.tzname() or 'локальное время'}, UTC{now_local.strftime('%z')[:3]}:00). "
-                f"UTC: {now_utc.strftime('%H:%M:%S')}.")
-    weekday = ["понедельник", "вторник", "среда", "четверг", "пятница", "суббота", "воскресенье"][
-        now_local.weekday()]
-    return (f"Сегодня **{now_local.strftime('%d.%m.%Y')}**, {weekday}. "
-            f"Время: {now_local.strftime('%H:%M')} ({now_local.tzname() or 'локальное'}).")
+        return _t("time_now",
+                  time=now_local.strftime("%H:%M:%S"),
+                  zone=now_local.tzname() or _t("local_time"),
+                  offset=now_local.strftime("%z")[:3] + ":00",
+                  utc=now_utc.strftime("%H:%M:%S"))
+    return _t("date_today",
+              date=now_local.strftime("%d.%m.%Y"),
+              weekday=offline_i18n.weekday(now_local.weekday()),
+              time=now_local.strftime("%H:%M"),
+              zone=now_local.tzname() or _t("local"))
 
 
 _SYSTEM_QUERY = re.compile(r"(\bсистем\w*|\bплатформ\w*|\bpython\b|\bверси\w*|\bos\b|\btermux\b)", re.I)
@@ -241,10 +230,13 @@ _SYSTEM_QUERY = re.compile(r"(\bсистем\w*|\bплатформ\w*|\bpython\b
 def _system_answer(text: str):
     if not _SYSTEM_QUERY.search(text or ""):
         return None
-    return (f"**Система:** {platform.system()} {platform.release()} ({platform.machine()})\n"
-            f"**Python:** {sys.version.split()[0]}\n"
-            f"**Устройство:** {platform.node() or 'неизвестно'}\n"
-            f"**Время сервера:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    return "\n".join((
+        _t("system_line", system=platform.system(), release=platform.release(),
+           machine=platform.machine()),
+        _t("python_line", version=sys.version.split()[0]),
+        _t("device_line", device=platform.node() or _t("unknown")),
+        _t("server_time_line", time=datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
+    ))
 
 
 # ─────────────────────────── работа с текстом ───────────────────────────
@@ -261,10 +253,10 @@ def _text_answer(text: str):
 
     if re.search(r"(сколько|число)\s+(слов|word)", low):
         words = re.findall(r"\w+", _payload_after(original, r".*?(?:слов|word)") or original)
-        return f"Слов: **{len(words)}**"
+        return _t("words", count=len(words))
     if re.search(r"(сколько|число)\s+(символ|букв|character)", low):
         payload = _payload_after(original, r".*?(?:символ\w*|букв\w*)") or original
-        return f"Символов: **{len(payload)}** (без учёта служебной части команды — считаю сам текст)"
+        return _t("chars", count=len(payload))
     if low.startswith("переверни "):
         return "".join(reversed(original[len("переверни "):]))
     if low.startswith("в верхний регистр "):
@@ -277,11 +269,11 @@ def _text_answer(text: str):
         if re.fullmatch(r"[A-Za-z0-9+/=\s]+", payload) and len(payload.strip()) % 4 == 0:
             try:
                 decoded = base64.b64decode(payload.strip(), validate=True).decode("utf-8")
-                return f"Base64 → текст:\n\n```\n{decoded}\n```"
+                return _t("base64_decoded", text=decoded)
             except Exception:
                 pass
         encoded = base64.b64encode(payload.encode("utf-8")).decode("ascii")
-        return f"Текст → base64:\n\n```\n{encoded}\n```"
+        return _t("base64_encoded", text=encoded)
 
     for algo in ("md5", "sha1", "sha256"):
         payload = _payload_after(original, algo)
@@ -294,7 +286,7 @@ def _text_answer(text: str):
         try:
             return "```json\n" + json.dumps(json.loads(payload), ensure_ascii=False, indent=2) + "\n```"
         except ValueError as exc:
-            return f"Это не валидный JSON: {exc}"
+            return _t("invalid_json", error=exc)
     return None
 
 
@@ -303,45 +295,22 @@ def _text_answer(text: str):
 _PROJECT_RE = re.compile(
     r"(?i)(структур\w*\s+проект|как\s+устроен\w*\s+проект|устройств\w*\s+проект|"
     r"архитектур\w*\s+проект|из\s+чего\s+состоит|какие\s+(?:файлы|модули|папки)|"
-    r"где\s+(?:лежит|находится|хранится)|про\s+структуру|project\s+structure)")
+    r"где\s+(?:лежит|находится|хранится)|про\s+структуру|project\s+structure|"
+    r"how\s+is\s+the\s+project\s+(?:structured|organized)|what\s+files|"
+    r"architecture\s+of\s+the\s+project|repository\s+layout|сохтори\s+лоиҳа)")
 
-_PROJECT_ANSWER = """**Офлайн-режим: языковой модели нет**, но устройство проекта я знаю точно.
+#: Project-structure answer template; localised in offline_i18n.py.
+#: (Kept as a module attribute for integrations that import it.)
+_PROJECT_ANSWER = offline_i18n.t("project_answer", lang="en")
 
-**Корень репозитория**
-- `app.py` — точка входа Flask: создаёт приложение, регистрирует blueprints, поднимает сервер.
-- `config.py` — провайдеры ИИ, модели, системный промпт, runtime-настройки.
-- `ai_providers.py` — единый слой обращения к моделям (Groq, Gemini, OpenRouter, Cerebras, OpenAI-совместимые, локальный сервер и офлайн-контур).
-- `database.py` — SQLite: чаты, сообщения, трассы шагов, запуски агента, расписания.
-- `identity.py`, `security.py` — владелец чата, лимиты, права.
-- `mcp_registry.py`, `mcp_chat.py`, `memory.py`, `skills_registry.py`, `scheduler.py` — MCP-серверы, память, навыки и задачи по расписанию.
-- `media_generation.py`, `media_agent.py`, `tts_service.py` — картинки, видео, аудио и озвучка.
-- `local_llm.py` — вот этот детерминированный офлайн-помощник.
-
-**HTTP-слой (`routes/`)**
-`agent.py` — NDJSON-поток агента, `chat.py` — обычный чат и `/send_stream`, `terminal.py` — песочница Linux, `search.py` — поиск, `media.py` — медиа, `admin.py` — вход и настройки.
-
-**ReAct-агент (`agent/`)**
-`loop.py` управляет циклом «модель → инструмент → наблюдение → ответ», `verification.py` помогает честно оценить результат, `workspace.py` изолирует рабочие каталоги, а `runtime.py` содержит общие правила работы с сессией и opt-in инструментов. `tool_registry.py` — единый каталог и точка запуска инструментов; `ai_providers.py` — единый слой моделей.
-
-**Фронтенд (`static/`, `templates/`)**
-`app.js` рисует чат и ответ, `linux.js` разбирает NDJSON-поток, `style.css` — оформление, остальные файлы — настройки, MCP, медиа, озвучка, аккордеоны.
-
-**Проверки (`tests/`)**
-PyTest-тесты движка, маршрутов, поиска, терминала, MCP и медиа плюс jsdom-смоук фронтенда.
-
-Итог: это тонкий Flask-слой поверх единого провайдера ИИ и агентного движка; все пользовательские возможности вынесены в отдельные маршруты, а состояние хранится в SQLite.
-
-Чтобы получить развёрнутый ответ на любой другой вопрос, подключите модель:
-{setup}
-
-{disclaimer}"""
 
 
 def _project_answer(text: str):
     """Полный ответ про структуру проекта в офлайн-режиме."""
     if not _PROJECT_RE.search(text or ""):
         return None
-    return _PROJECT_ANSWER.format(setup=_SETUP_HINT, disclaimer=DISCLAIMER)
+    return _t("project_answer").format(setup=_t("setup_hint"),
+                                       disclaimer=_t("disclaimer"))
 
 
 def _file_answer(text: str):
@@ -359,12 +328,12 @@ def _file_answer(text: str):
         from routes.terminal import safe_path
         path = safe_path(match.group(1))
         if not os.path.isfile(path):
-            return f"Файл `{match.group(1)}` не найден в рабочей папке."
+            return _t("file_not_found", name=match.group(1))
         with open(path, "r", encoding="utf-8", errors="replace") as handle:
             body = handle.read(4000)
         return f"`{match.group(1)}`:\n\n```\n{body}\n```"
     except Exception as exc:
-        return f"Не удалось прочитать файл: {exc}"
+        return _t("file_read_error", error=exc)
 
 
 # ─────────────────────────── публичный API ───────────────────────────
@@ -375,16 +344,19 @@ _META_BRACKETS = re.compile(r"\[[^\]]{10,}\]", re.DOTALL)
 def clean_prompt(text: str) -> str:
     """Убирает служебные вставки вида «[Поиск не дал результатов. Отвечай…]»."""
     cleaned = _META_BRACKETS.sub(" ", text or "")
-    cleaned = re.sub(r"^(Вопрос|Запрос)\s*:\s*", "", cleaned.strip())
-    cleaned = re.sub(r"(Данные из интернета|Результаты поиска)\s*:\s*.*$", "", cleaned, flags=re.DOTALL)
+    cleaned = re.sub(r"^(Вопрос|Запрос|Question|Request)\s*:\s*", "", cleaned.strip())
+    cleaned = re.sub(r"(Данные из интернета|Результаты поиска|Web data|Search results)"
+                     r"\s*:\s*.*$", "", cleaned, flags=re.DOTALL)
     return re.sub(r"\s{2,}", " ", cleaned).strip()
 
 
 # Служебные сообщения, которые агент дописывает в историю между шагами:
 # это не вопрос пользователя, и офлайн-контур не должен их «отвечать».
 _INTERNAL_RE = re.compile(
-    r"(Не вызывай\s+run|Отвечай по своим знаниям|уже показано пользователю|"
-    r"^Инструменты |^SEARCH HINT|^Результат инструмента|^Наблюдение|^План принят)",
+    r"(Не вызывай\s+run|Do not call\s+run|Отвечай по своим знаниям|Answer from your own|"
+    r"уже показано пользователю|already shown to the user|"
+    r"^Инструменты |^Tools |^SEARCH HINT|^Результат инструмента|^Tool result|"
+    r"^Наблюдение|^Observation|^План принят|^Plan accepted)",
     re.I | re.M)
 
 
@@ -405,10 +377,13 @@ def _last_user_prompt(messages) -> str:
 
 
 def complete(messages, **_kwargs) -> str:
-    """Возвращает текст ответа для списка сообщений в OpenAI-формате."""
-    raw = _last_user_prompt(messages) or "пустой запрос"
-    prompt = clean_prompt(raw) or "пустой запрос"
-    lowered = prompt.lower()
+    """Возвращает текст ответа для списка сообщений в OpenAI-формате.
+
+    Язык ответа — язык интерфейса (language_policy): офлайн-помощник, как и
+    обычная модель, отвечает на выбранном языке, а не на жёстко заданном.
+    """
+    raw = _last_user_prompt(messages) or _t("empty_query")
+    prompt = clean_prompt(raw) or _t("empty_query")
 
     for handler in (_math_answer, _unit_answer, _datetime_answer, _system_answer,
                     _text_answer, _project_answer, _file_answer):
@@ -419,30 +394,22 @@ def complete(messages, **_kwargs) -> str:
         if answer:
             return answer
 
-    for key, answer in _KNOWLEDGE.items():
-        if key in lowered:
-            return f"{answer}\n\n{DISCLAIMER}"
+    knowledge = offline_i18n.knowledge_answer(prompt)
+    if knowledge:
+        return f"{knowledge}\n\n{_t('disclaimer')}"
 
-    return (
-        f"**Офлайн-режим: языковой модели нет.**\n\n"
-        f"Вопрос: «{prompt[:300]}{'…' if len(prompt) > 300 else ''}»\n\n"
-        f"Я могу прямо сейчас:\n"
-        f"- посчитать: `2+2*2`, `15% от 200`;\n"
-        f"- перевести единицы: `10 км в мили`, `20 C в F`;\n"
-        f"- показать дату и время: `сколько времени`;\n"
-        f"- обработать текст: `sha256: привет`, `base64: привет`, `json: {{\"a\":1}}`.\n\n"
-        f"{_SETUP_HINT}\n\n{DISCLAIMER}"
-    )
+    shown = prompt[:300] + ("…" if len(prompt) > 300 else "")
+    return _t("fallback", prompt=shown, setup=_t("setup_hint"),
+              disclaimer=_t("disclaimer"))
 
 
 def reasoning(prompt: str) -> str:
-    """Ход «рассуждений» офлайн-режима — честный и короткий."""
-    steps = ["Определяю тип запроса: арифметика, единицы, дата, текст или общий вопрос."]
-    if _math_answer(clean_prompt(prompt)):
-        steps.append("Запрос похож на арифметику — считаю по AST без eval.")
-    else:
-        steps.append("Готового офлайн-инструмента нет — честно сообщаю ограничения.")
-    return "План:\n" + "\n".join(f"{i}. {text}" for i, text in enumerate(steps, 1))
+    """Ход «рассуждений» офлайн-режима — честный, короткий и на языке интерфейса."""
+    steps = [_t("reasoning_step_1")]
+    steps.append(_t("reasoning_step_math") if _math_answer(clean_prompt(prompt))
+                 else _t("reasoning_step_none"))
+    return (_t("reasoning_header") + "\n"
+            + "\n".join(f"{i}. {text}" for i, text in enumerate(steps, 1)))
 
 
 def stream(messages, **kwargs):
@@ -465,12 +432,8 @@ def _split(text: str, size: int = 18):
         yield text[start:start + size]
 
 
-OFFLINE_MARKERS = (
-    "офлайн-режим novamind",
-    "офлайн-режим: языковой модели нет",
-    "детерминированный помощник",
-    "языковой модели нет",
-)
+#: Маркеры офлайн-ответа на всех поддерживаемых языках.
+OFFLINE_MARKERS = offline_i18n.OFFLINE_MARKERS
 
 
 def looks_offline(text: str) -> bool:
@@ -484,8 +447,8 @@ def models_catalog():
         {
             "id": MODEL_ID,
             "name": MODEL_NAME,
-            "description": "Офлайн-помощник: арифметика, единицы, дата/время, текст. "
-                           "Без интернета и ключей; языковой моделью не является.",
+            "description": "Offline helper: arithmetic, units, date/time, text. "
+                           "No internet and no keys; it is not a language model.",
             "provider": PROVIDER_ID,
             "provider_name": PROVIDER_NAME,
             "context_length": 8192,
@@ -493,7 +456,7 @@ def models_catalog():
             "pricing_status": "free",
             "price_prompt": "0",
             "price_completion": "0",
-            "pricing_label": "бесплатно (офлайн)",
+            "pricing_label": "free (offline)",
             "recommended": True,
             "free": True,
         }

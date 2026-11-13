@@ -257,26 +257,95 @@ def settings_select():
                     "provider_name": PROVIDER_LABELS.get(provider, provider),
                     "message": f"Выбрано: {model}"})
 
-SUPPORTED_LANGUAGES = ("tg", "ru", "en")
+import language_policy
+
+#: Языки, для которых есть полный перевод интерфейса. Ответ модели может быть
+#: на любом языке из language_policy.LANGUAGES — промпты остаются английскими.
+SUPPORTED_LANGUAGES = language_policy.UI_LANGUAGES
 
 
 @settings_bp.route('/api/settings/lang')
 def get_ui_language():
     import config
     return jsonify({"language": config.ui_language,
-                    "default": "tg",
-                    "supported": list(SUPPORTED_LANGUAGES)})
+                    "default": language_policy.DEFAULT_LANGUAGE,
+                    "supported": list(SUPPORTED_LANGUAGES),
+                    "answer_languages": language_policy.supported(),
+                    "policy": language_policy.summary()})
 
 
 @settings_bp.route('/api/settings/lang', methods=['POST'])
 def set_ui_language():
     import config
     data = request.get_json() or {}
-    lang = (data.get("language") or "").strip().lower()
+    lang = language_policy.normalize(data.get("language"))
     if lang not in SUPPORTED_LANGUAGES:
-        return jsonify({"error": "Язык не поддерживается. Доступны: tg, ru, en"}), 400
+        return jsonify({"error": "Язык интерфейса не поддерживается. Доступны: "
+                                 + ", ".join(SUPPORTED_LANGUAGES)}), 400
     config.save_ui_language(lang)
-    return jsonify({"success": True, "language": config.ui_language})
+    # Язык запоминается ещё и в сессии: у каждого посетителя он свой, а
+    # language_policy читает сессию при каждом запросе к модели.
+    language_policy.set_session_language(lang)
+    return jsonify({"success": True, "language": config.ui_language,
+                    "answer_language": language_policy.english_name(lang)})
+
+
+@settings_bp.route('/api/settings/local')
+def settings_local():
+    """Локальный движок: пресеты, адрес, каталог моделей и их возможности."""
+    import ai_providers
+    force = request.args.get("refresh", "0") == "1"
+    return jsonify(ai_providers.local_runtime_status(force=force))
+
+
+@settings_bp.route('/api/settings/local', methods=['POST'])
+def settings_local_save():
+    """Сохраняет адрес/пресет локального сервера без правки .env."""
+    import config
+    import local_providers
+    data = request.get_json(silent=True) or {}
+    requested = str(data.get("preset") or "").strip().lower()
+    preset = local_providers.preset_id(requested) or "auto"
+    if requested and requested != "auto" and not local_providers.preset_id(requested):
+        # Опечатку в пресете нельзя молча превращать в «определить самому»:
+        # пользователь должен увидеть, какие движки поддерживаются.
+        return jsonify({"error": f"Неизвестный пресет: {requested}",
+                        "presets": [item["id"] for item in local_providers.preset_catalog()]}), 400
+    base_url = str(data.get("base_url") or "").strip()
+    if not base_url and preset != "auto":
+        base_url = local_providers.preset_info(preset)["base_url"]
+    if base_url and not base_url.lower().startswith(("http://", "https://")):
+        return jsonify({"error": "Адрес локального сервера должен начинаться с http:// или https://"}), 400
+    updates = {"preset": preset, "base_url": base_url}
+    if "api_key" in data:
+        updates["api_key"] = str(data.get("api_key") or "")
+    engine = config.save_local_engine(updates)
+    # Новый сервер — новый каталог: старый кэш не должен его подменять.
+    local_providers.discover(force=True)
+    status = local_providers.status(force=True)
+    return jsonify({"success": True, "engine": {
+        "preset": engine.get("preset"),
+        "base_url": engine.get("base_url"),
+        "has_key": bool(engine.get("api_key")),
+    }, "server": status})
+
+
+@settings_bp.route('/api/settings/local/test', methods=['POST'])
+def settings_local_test():
+    """Проверка адреса до сохранения: жив ли сервер и что он отдаёт."""
+    import local_providers
+    data = request.get_json(silent=True) or {}
+    base_url = str(data.get("base_url") or "").strip()
+    preset = local_providers.preset_id(data.get("preset")) or ""
+    if not base_url:
+        if preset:
+            base_url = local_providers.preset_info(preset)["base_url"]
+        else:
+            base_url = local_providers.configured_base()
+    if not base_url.lower().startswith(("http://", "https://")):
+        return jsonify({"error": "Адрес должен начинаться с http:// или https://"}), 400
+    status = local_providers.status(base_url, force=True)
+    return jsonify({"ok": bool(status.get("reachable")), **status})
 
 
 @settings_bp.route('/admin/login')

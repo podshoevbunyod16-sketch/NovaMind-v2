@@ -122,7 +122,7 @@ def test_mcp_only_request_refuses_ordinary_shell(admin_client, sandbox, monkeypa
     }))
     tool = events_of(events, "tool")[0]
     assert tool["name"] == "shell" and tool["status"] == "error"
-    assert "недоступен в этом запуске" in tool["output"]
+    assert "is not available in this run" in tool["output"]
 
 
 def test_mcp_search_calls_have_no_arbitrary_three_call_cap(admin_client, sandbox, monkeypatch):

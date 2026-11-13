@@ -374,7 +374,7 @@ def test_repeated_tool_call_is_rejected_and_reported(admin_client, monkeypatch, 
     assert sum(tool["status"] == "ok" for tool in tools) == 1
     assert any(tool.get("status") == "error" and "repeat_call" in json.dumps(tool)
                for tool in tools), tools
-    assert "уже выполнялся" in model_text(seen, -1).lower()
+    assert "already ran" in model_text(seen, -1).lower()
     assert "Готово" in answer_of(events)
 
 

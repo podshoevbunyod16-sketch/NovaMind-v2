@@ -77,10 +77,10 @@ def analyze_attachment():
 
         instruction = user_desc or _default_file_instruction(ext)
         prompt = (
-            f"Файл: {filename}\n\nЗадача: {instruction}\n\n"
-            f"Содержимое:\n{text[:120000]}\n\n"
-            "Отвечай на русском языке в Markdown. Не выдумывай данные. "
-            "Для кода указывай конкретные ошибки и исправления."
+            f"File: {filename}\n\nTask: {instruction}\n\n"
+            f"Content:\n{text[:120000]}\n\n"
+            "Answer in Markdown, in the language required by the ANSWER LANGUAGE "
+            "directive. Do not invent data. For code, point out concrete problems and fixes."
         )
         reply, error = _call_selected_text_ai(prompt)
         if error:
@@ -101,18 +101,19 @@ def analyze_attachment():
 
 def _default_file_instruction(ext):
     if ext == '.py':
-        return 'Проанализируй Python-код, объясни его работу, найди ошибки и предложи улучшения.'
+        return ('Analyse the Python code, explain how it works, find bugs and suggest '
+                'improvements.')
     if ext in {'.js','.ts','.jsx','.tsx'}:
-        return 'Проанализируй JavaScript/TypeScript-код, найди ошибки и предложи улучшения.'
+        return ('Analyse the JavaScript/TypeScript code, find bugs and suggest improvements.')
     if ext in {'.html','.css'}:
-        return 'Проанализируй веб-файл, объясни структуру и найди проблемы.'
+        return 'Analyse the web file, explain its structure and find problems.'
     if ext == '.json':
-        return 'Проанализируй структуру JSON и объясни важные данные.'
+        return 'Analyse the JSON structure and explain the important data.'
     if ext in {'.csv','.tsv'}:
-        return 'Проанализируй таблицу, колонки, данные и важные закономерности.'
+        return 'Analyse the table: columns, data and important patterns.'
     if ext == '.md':
-        return 'Сделай структурированное резюме документа и выдели главное.'
-    return 'Подробно проанализируй файл и объясни его содержимое.'
+        return 'Write a structured summary of the document and highlight the key points.'
+    return 'Analyse the file in detail and explain its content.'
 
 
 def _extract_attachment_text(filepath, ext, content_type):

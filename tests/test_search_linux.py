@@ -319,7 +319,7 @@ def test_search_button_with_empty_results(google_client, sandbox, monkeypatch):
     events = ndjson(google_client.post("/api/agent/stream",
                                        json={"message": "редкий вопрос", "auto_search": True}))
     assert any(event["type"] == "step" and "ничего не дал" in event["text"] for event in events)
-    assert "ничего не нашёл" in model_text(seen)
+    assert "found nothing" in model_text(seen)
     assert answer_of(events) == "Отвечу из базы знаний"
 
 

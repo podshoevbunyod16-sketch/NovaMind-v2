@@ -204,7 +204,15 @@ PROVIDERS = {
 # Текущий провайдер и модель (меняются через /api/settings/select)
 current_provider = "groq"
 current_model    = "openai/gpt-oss-120b"
-system_prompt    = os.getenv("SYSTEM_PROMPT", "Ты — NovaMind, умный AI-ассистент. Отвечай чётко и по делу.")
+# Prompt language policy: every prompt in the code base is written in English.
+# The answer language is injected at request time by language_policy.py, so this
+# text must not name a language ("answer in Russian") — it only sets behaviour.
+system_prompt    = os.getenv(
+    "SYSTEM_PROMPT",
+    "You are NovaMind, a precise and helpful AI assistant. Be concrete, accurate "
+    "and honest about what you know and what you did not verify. Prefer clear "
+    "structure over filler.",
+)
 
 # Выбранная медиа-модель (изображение / аудио / видео).
 # Пустой словарь — генерация медиа выключена, чат работает как обычный текстовый.
@@ -212,7 +220,59 @@ system_prompt    = os.getenv("SYSTEM_PROMPT", "Ты — NovaMind, умный AI-
 media_selection: dict = {}
 
 # ---------- Язык интерфейса (i18n: tg | ru | en) ----------
+# ui_language — язык, на котором интерфейс отвечает пользователю. Промпты при
+# этом остаются английскими: language_policy.py добавляет к системному
+# промпту короткую английскую директиву «answer in <language>».
 ui_language: str = "tg"
+
+# ---------- Локальный движок моделей ----------
+# Настройки локального OpenAI-compatible сервера (Ollama, LM Studio,
+# llama.cpp, vLLM, LocalAI, Jan, KoboldCpp, text-generation-webui).
+# Хранятся в runtime_settings.json и переопределяют OPENAI_BASE_URL.
+local_engine: dict = {
+    "preset": "auto",   # auto | ollama | lmstudio | llamacpp | vllm | ...
+    "base_url": "",     # "" — взять из LOCAL_LLM_URL / OPENAI_BASE_URL
+    "api_key": "",      # "" — локальному серверу ключ обычно не нужен
+}
+
+
+def normalize_local_engine(value) -> dict:
+    """Приводит настройки локального движка к известной схеме."""
+    base = dict(local_engine)
+    if not isinstance(value, dict):
+        return base
+    preset = str(value.get("preset") or base.get("preset") or "auto").strip().lower()
+    base["preset"] = preset or "auto"
+    for key in ("base_url", "api_key"):
+        if key in value:
+            base[key] = str(value.get(key) or "").strip()[:500]
+    if "base_url" in base and base["base_url"]:
+        base["base_url"] = base["base_url"].rstrip("/")
+    return base
+
+
+def apply_local_engine(engine: dict | None = None) -> dict:
+    """Прокидывает настройки локального сервера в PROVIDERS['openai_compatible']."""
+    global local_engine
+    if engine is not None:
+        local_engine = normalize_local_engine(engine)
+    target = PROVIDERS.get("openai_compatible")
+    if not target:
+        return dict(local_engine)
+    import local_providers
+
+    base = local_engine.get("base_url") or ""
+    if base:
+        target["url"] = local_providers.chat_url(base)
+    else:
+        target["url"] = local_providers.chat_url(
+            os.getenv("LOCAL_LLM_URL") or os.getenv("OPENAI_COMPATIBLE_URL")
+            or os.getenv("OPENAI_BASE_URL") or target.get("url"))
+    key = (local_engine.get("api_key") or os.getenv("OPENAI_COMPATIBLE_KEY")
+           or os.getenv("OPENAI_API_KEY") or "ollama")
+    target["headers"] = {"Authorization": f"Bearer {key}",
+                         "Content-Type": "application/json"}
+    return dict(local_engine)
 
 # ---------- Озвучка ответов (TTS) ----------
 # Одно место хранения: те же runtime_settings.json, что и модель/язык.
@@ -251,6 +311,7 @@ RUNTIME_SETTINGS_FILE = os.path.join(os.path.dirname(__file__), "runtime_setting
 def load_runtime_settings():
     """Загружает сохранённый провайдер/модель между перезапусками."""
     global current_provider, current_model, system_prompt, media_selection, speech_settings
+    global local_engine, ui_language
     if os.path.exists(RUNTIME_SETTINGS_FILE):
         try:
             with open(RUNTIME_SETTINGS_FILE, "r", encoding="utf-8") as f:
@@ -273,11 +334,16 @@ def load_runtime_settings():
             saved_media = s.get("media_selection")
             media_selection = saved_media if isinstance(saved_media, dict) else {}
             saved_lang = s.get("ui_language")
-            if saved_lang in ("tg", "ru", "en"):
-                ui_language = saved_lang
+            if isinstance(saved_lang, str) and saved_lang.strip():
+                import language_policy
+                ui_language = language_policy.normalize(saved_lang) or ui_language
             saved_speech = s.get("speech")
             if isinstance(saved_speech, dict):
                 globals()["speech_settings"] = normalize_speech_settings(saved_speech)
+            saved_engine = s.get("local_engine")
+            if isinstance(saved_engine, dict):
+                local_engine = normalize_local_engine(saved_engine)
+            apply_local_engine()
         except Exception as e:
             logger.warning("Ошибка чтения runtime_settings: %s", e)
 
@@ -290,6 +356,7 @@ def _write_runtime_settings():
             "media_selection": media_selection,
             "ui_language": ui_language,
             "speech": speech_settings,
+            "local_engine": local_engine,
         }, f, ensure_ascii=False, indent=2)
 
 def save_selected_model(provider, model):
@@ -325,15 +392,35 @@ def save_speech_settings(updates: dict | None = None) -> dict:
 
 
 def save_ui_language(language: str):
-    """Сохраняет выбранный язык интерфейса (tg | ru | en)."""
+    """Сохраняет выбранный язык интерфейса и, значит, язык ответов модели.
+
+    Промпты остаются английскими: меняется только код языка, который
+    language_policy.py дописывает к системному промпту.
+    """
     global ui_language
-    if language in ("tg", "ru", "en"):
-        ui_language = language
+    import language_policy
+    normalized = language_policy.normalize(language)
+    if normalized:
+        ui_language = normalized
     try:
         _write_runtime_settings()
     except Exception as e:
         logger.warning("Ошибка сохранения языка: %s", e)
     return ui_language
+
+
+def save_local_engine(updates: dict | None = None) -> dict:
+    """Сохраняет адрес/пресет локального сервера и применяет его сразу."""
+    global local_engine
+    local_engine = normalize_local_engine({**local_engine, **(updates or {})})
+    if updates and "base_url" in updates and not local_engine.get("base_url"):
+        local_engine["base_url"] = ""
+    apply_local_engine(local_engine)
+    try:
+        _write_runtime_settings()
+    except Exception as e:
+        logger.warning("Ошибка сохранения настроек локального движка: %s", e)
+    return dict(local_engine)
 
 
 load_runtime_settings()
@@ -386,16 +473,12 @@ def local_endpoint_available(force: bool = False) -> bool:
     now = time.time()
     if not force and now - _LOCAL_PROBE["at"] < _LOCAL_PROBE_TTL:
         return _LOCAL_PROBE["ok"]
-    base = (os.getenv("OPENAI_BASE_URL") or os.getenv("OPENAI_COMPATIBLE_URL")
-            or "http://127.0.0.1:8080/v1").rstrip("/")
-    if base.endswith("/chat/completions"):
-        base = base[: -len("/chat/completions")].rstrip("/")
-    url = base + "/models"
     ok = False
     try:
-        import requests
-        response = requests.get(url, timeout=1.5)
-        ok = response.status_code < 500
+        import local_providers
+        health = local_providers.health(local_providers.configured_base(), force=True,
+                                        timeout=1.5)
+        ok = bool(health.get("reachable"))
     except Exception:
         ok = False
     _LOCAL_PROBE.update({"at": now, "ok": ok})

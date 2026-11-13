@@ -78,17 +78,18 @@ def _run(goal, record_id, *, chat_id="", history=None, observations=None,
                              "inputSchema": item.get("inputSchema"), "annotations": item.get("annotations")}
                             for item in connected]
             integration_context = (
-                "Подключённые MCP-серверы и обнаруженные инструменты: "
+                "Connected MCP servers and discovered tools: "
                 + json.dumps({"servers": servers, "tools": tool_catalog}, ensure_ascii=False,
                              separators=(",", ":"))
-                + "\nВыбирай инструмент по смыслу цели пользователя и описанию его возможностей, а не по совпадению "
-                "ключевых слов, примерам прошлых запросов или только по имени. Сопоставляй синонимы и "
-                "подразумеваемое действие с описанием и inputSchema; если инструмент подходит — вызови его "
-                "с аргументами, выведенными из запроса. Не вызывай search_mcp_servers лишь потому, что "
-                "пользователь просит выполнить поиск или действие: сначала проверь подключённый каталог. "
-                "Если подходящего инструмента нет в списке или контекст обрезан, вызови mcp_list с server_id; "
-                "для большого каталога продолжай по next_offset. Выполняй только требуемое действие, "
-                "проверяй isError/ошибку и не объявляй задачу успешной без подтверждающего результата."
+                + "\nChoose a tool by the meaning of the user's goal and the tool's described "
+                "capabilities, not by keyword overlap, previous examples or the name alone. Match "
+                "synonyms and the implied action against the description and inputSchema; if a "
+                "tool fits, call it with arguments derived from the request. Do not call "
+                "search_mcp_servers merely because the user asked for a search or an action: "
+                "check the connected catalogue first. If no suitable tool is listed or the "
+                "context was truncated, call mcp_list with the server_id; for a large catalogue "
+                "continue with next_offset. Perform only the requested action, inspect "
+                "isError/errors and never report success without confirming evidence."
             )
     except Exception:
         current_app.logger.warning("Не удалось перечислить MCP-инструменты", exc_info=True)
@@ -474,9 +475,9 @@ def answer_react_question():
                 sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
         if approval_key:
             approvals.append(approval_key)
-        messages.append({"role": "user", "content": f"Пользователь разрешил действие {tool_name}. Выполни его и проверь результат."})
+        messages.append({"role": "user", "content": f"The user approved the action {tool_name}. Run it and verify the result."})
     else:
-        messages.append({"role": "user", "content": "Ответ пользователя на уточнение: " + answer[:4000]})
+        messages.append({"role": "user", "content": "The user answered the clarifying question: " + answer[:4000]})
     database.update_agent_run(record["id"], status="running", pending_question="")
     chat_id = record.get("chat_id") or ""
     if chat_id:
@@ -516,7 +517,7 @@ def finish_react_run():
         except (ValueError, TypeError):
             context = {}
         history = list(context.get("messages") or [])
-        history.append({"role": "user", "content": "Продолжай работу над исходной целью. Используй наблюдения и не повторяй уже выполненные действия."})
+        history.append({"role": "user", "content": "Continue working on the original goal. Use the observations and do not repeat actions that were already completed."})
         database.update_agent_run(record["id"], status="running", outcome=outcome)
         run_id = str(record.get("run_id") or record["id"])
         cancel = threading.Event()

@@ -495,7 +495,52 @@ LOG_LEVEL=INFO
 
 # Внешний адрес сервиса: нужен для OAuth, Referer и абсолютных ссылок
 SITE_URL=http://localhost:5000
+
+# Локальная модель (Ollama / LM Studio / llama.cpp / vLLM / LocalAI)
+LOCAL_LLM_URL=http://127.0.0.1:11434/v1
+LOCAL_LLM_AUTODETECT=1
+LOCAL_LLM_TOOLS=auto            # auto | on | off
+LOCAL_LLM_REASONING=auto        # auto | on | off
+LOCAL_LLM_DEEP_SCAN=0           # точные возможности из Ollama /api/show
+LOCAL_LLM_STREAM_USAGE=1        # usage при потоковом ответе
 ```
+
+### Язык промптов и ответов
+
+Промпты проекта всегда английские: системные промпты, правила ReAct,
+инструкции поиска, наблюдения инструментов и pre-pass рассуждений. Язык ответа
+задаёт интерфейс — `language_policy.py` дописывает к системному промпту
+английскую директиву `ANSWER LANGUAGE (required): <language>` и делает это в
+одном месте (`ai_providers`), поэтому правило действует для всех провайдеров.
+
+```python
+language_policy.current_language()      # body → X-UI-Language → сессия → config
+language_policy.apply_to_system(text)   # идемпотентно, повторно не дублирует
+language_policy.pick(en=..., ru=..., tg=...)   # короткие сообщения в ответе
+```
+
+Полный перевод интерфейса есть для `tg`, `ru`, `en`; языков ответа — около 80
+(`language_policy.LANGUAGES`). Код, пути, команды, URL и имена инструментов не
+переводятся. Подробности — в [LOCAL_MODELS.md](LOCAL_MODELS.md).
+
+### Локальные модели
+
+Локальный сервер получает те же возможности, что Groq и OpenRouter: поток,
+нативный tool calling с деградацией без `tools`, JSON-режим, рассуждения,
+vision и учёт токенов. Каталог берётся из `/api/tags` (Ollama, включая
+`/api/show`), `/api/v0/models` (LM Studio) или `/v1/models`; пресет
+определяется по порту. Панель `/settings` → «Локальные модели» проверяет сервер
+и сохраняет адрес в `runtime_settings.json`:
+
+| Метод | Путь | Назначение |
+|---|---|---|
+| `GET` | `/api/settings/local?refresh=1` | Каталог, возможности, матрица функций |
+| `POST` | `/api/settings/local` | `{preset, base_url, api_key}` → сохранить и применить |
+| `POST` | `/api/settings/local/test` | Проверить адрес до сохранения |
+
+Неизвестный пресет — `400` со списком поддерживаемых; ключ никогда не
+возвращается (только `has_key`). Подробности — в
+[LOCAL_MODELS.md](LOCAL_MODELS.md).
 
 ---
 

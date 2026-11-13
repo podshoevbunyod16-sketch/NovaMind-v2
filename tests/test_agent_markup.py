@@ -36,7 +36,9 @@ def test_fenced_json_uses_only_the_declared_tool_and_arguments():
     assert "real" in result.answer
 
 
-def test_model_cannot_forge_successful_shell_output_with_markup():
+def test_model_cannot_forge_successful_shell_output_with_markup(monkeypatch):
+    import config
+    monkeypatch.setattr(config, "ui_language", "ru")
     calls = []
     result = run_react(AgentContext(
         "Создай файл report.txt", complete=lambda *a, **k:

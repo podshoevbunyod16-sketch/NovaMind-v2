@@ -10,7 +10,7 @@ PLATFORM_TOKEN = os.getenv("PLATFORM_TOKEN", "")
 def ask_model(text: str) -> str:
     reply, meta = chat_completion(
         [{"role": "user", "content": text}],
-        system="Ты полезный AI-ассистент.",
+        system=("You are a helpful AI assistant. Answer precisely and state your assumptions."),
         temperature=0.7,
         max_tokens=1024,
         timeout=60,

@@ -11,6 +11,8 @@ from email.utils import parsedate_to_datetime
 import requests
 from groq_rotation import get_groq_key, mark_groq_key_exhausted, GROQ_KEY_COOLDOWN, mark_groq_key_success
 import provider_manager as pm
+import language_policy
+import local_providers
 
 logger = logging.getLogger(__name__)
 
@@ -474,7 +476,9 @@ def supports_native_tools(provider: str | None = None, model: str | None = None)
     """Умеет ли провайдер/модель нативный tool calling.
 
     Отключается переменной окружения AI_NATIVE_TOOLS=0 (аварийный откат
-    на старый JSON-протокол без правки кода).
+    на старый JSON-протокол без правки кода). Для локального сервера решение
+    принимает local_providers: каталог Ollama/LM Studio сообщает реальные
+    возможности модели, а LOCAL_LLM_TOOLS=on|off|auto ими управляет.
     """
     if os.getenv("AI_NATIVE_TOOLS", "1") != "1":
         return False
@@ -482,6 +486,11 @@ def supports_native_tools(provider: str | None = None, model: str | None = None)
         provider = resolve_target()[0]
     if provider == "local_demo":
         return False
+    if provider == "openai_compatible":
+        try:
+            return local_providers.tools_supported(str(model or ""))
+        except Exception:                                  # noqa: BLE001
+            return True
     return provider in NATIVE_TOOL_PROVIDERS
 
 
@@ -768,9 +777,46 @@ def _mark_stream_key_failure(provider, model, response, error_text):
         logger.debug("stream key failure update failed", exc_info=True)
 
 
+def _local_request_options(model, extra=None, *, reasoning=False,
+                           json_mode=False, json_schema=None):
+    """Optional OpenAI-compatible params for a local runtime (never raises)."""
+    try:
+        return local_providers.request_options(
+            str(model or ""), extra=extra, reasoning=reasoning,
+            json_mode=json_mode, json_schema=json_schema)
+    except Exception:                                      # noqa: BLE001
+        logger.debug("local request options failed", exc_info=True)
+        return dict(extra or {})
+
+
+def _request_local_with_fallback(provider, model, cfg, payload, timeout):
+    """POST a local request; retry once without fields the server rejected.
+
+    Local runtimes differ in what they implement: one llama-server build
+    accepts ``tools`` but not ``response_format``, another accepts both.
+    A 400 that names an optional field is answered by dropping just that
+    field instead of failing the user's chat.
+    """
+    data, error = _managed_provider_request(
+        provider, model, cfg["url"], payload, provider_headers(provider), timeout=timeout)
+    if data is not None or provider != "openai_compatible" or not error:
+        return data, error, []
+    fields = local_providers.rejected_fields(str(error))
+    stripped = local_providers.strip_fields(payload, fields)
+    if not fields or stripped == payload:
+        return data, error, []
+    logger.info("local server rejected optional fields %s — retrying without them", fields)
+    data, retry_error = _managed_provider_request(
+        provider, model, cfg["url"], stripped, provider_headers(provider), timeout=timeout)
+    if data is not None:
+        return data, None, fields
+    return None, (retry_error or error), fields
+
+
 def _chat_completion_once(messages, provider=None, model=None, system=None,
                           temperature=0.7, max_tokens=None, timeout=90, extra=None,
-                          tools=None, tool_choice=None):
+                          tools=None, tool_choice=None, json_mode=False,
+                          json_schema=None):
     """
     Синхронный запрос к текущей модели.
     Возвращает (text, meta) или (None, error_string).
@@ -778,9 +824,14 @@ def _chat_completion_once(messages, provider=None, model=None, system=None,
     `tools` — OpenAI-совместимый список инструментов. Если провайдер их
     поддерживает, ответ может не содержать текста, но содержать tool_calls:
     тогда meta["tool_calls"] — разобранные вызовы (см. normalize_tool_calls).
+
+    Промпты здесь всегда английские; язык ответа задаёт language_policy,
+    дописывая к системе короткую директиву под выбранный язык интерфейса.
     """
     provider, model, cfg = resolve_target(provider, model)
+    system = language_policy.apply_to_system(system)
     tools_payload = openai_tools_payload(tools) if (tools and supports_native_tools(provider, model)) else []
+    local_caps = {}
 
     if provider == "local_demo":
         import local_llm
@@ -801,14 +852,24 @@ def _chat_completion_once(messages, provider=None, model=None, system=None,
         payload["tool_choice"] = tool_choice or "auto"
     if extra:
         payload.update(extra)
+    if provider == "openai_compatible":
+        # Same knobs hosted providers get for free: JSON mode, sampling,
+        # reasoning controls and usage accounting.
+        options = _local_request_options(model, extra=None, json_mode=json_mode,
+                                         json_schema=json_schema)
+        payload.update(options)
+        local_caps = local_providers.capabilities_for(str(model))
 
     if provider == "google_ai_studio":
         data, error = gemini_request(model, payload, timeout=timeout)
     elif provider == "groq":
         data, error = groq_request_with_rotation(cfg["url"], payload, provider_headers("groq"), timeout=timeout)
     else:
-        data, error = _managed_provider_request(
-            provider, model, cfg["url"], payload, provider_headers(provider), timeout=timeout)
+        data, error, degraded = _request_local_with_fallback(
+            provider, model, cfg, payload, timeout)
+        if data is not None and degraded:
+            local_caps = dict(local_caps or {})
+            local_caps["degraded"] = degraded
 
     if error:
         return None, error
@@ -819,7 +880,8 @@ def _chat_completion_once(messages, provider=None, model=None, system=None,
             text = "".join(str(p.get("text", "")) for p in text if isinstance(p, dict))
         text = str(text)
         tool_calls = normalize_tool_calls(message.get("tool_calls"))
-        thought = message.get("reasoning") or message.get("reasoning_content") or ""
+        thought = (message.get("reasoning") or message.get("reasoning_content")
+                   or message.get("thinking") or "")
         thought = thought if isinstance(thought, str) else ""
         if not text.strip() and thought.strip() and not tool_calls:
             text = thought
@@ -829,16 +891,23 @@ def _chat_completion_once(messages, provider=None, model=None, system=None,
     if not text.strip() and not tool_calls:
         logger.warning("Пустые content и reasoning (provider=%s, model=%s)", provider, model)
         return None, "Провайдер вернул пустой ответ (content и reasoning отсутствуют)"
-    return text, {"provider": provider, "model": model, "offline": False,
-                  "tool_calls": tool_calls,
-                  "native_tools": bool(tools_payload),
-                  # usage пригодится на этапе счётчика токенов
-                  "usage": data.get("usage") if isinstance(data, dict) else None}
+    degraded_fields = list((local_caps or {}).get("degraded") or [])
+    result_meta = {"provider": provider, "model": model, "offline": False,
+                   "tool_calls": tool_calls,
+                   "native_tools": bool(tools_payload) and "tools" not in degraded_fields,
+                   "answer_language": language_policy.current_language(),
+                   # usage пригодится на этапе счётчика токенов
+                   "usage": data.get("usage") if isinstance(data, dict) else None}
+    if local_caps:
+        result_meta["capabilities"] = local_caps
+        result_meta["local"] = provider == "openai_compatible"
+    return text, result_meta
 
 
 def chat_completion(messages, provider=None, model=None, system=None,
                     temperature=0.7, max_tokens=None, timeout=90, extra=None,
-                    tools=None, tool_choice=None):
+                    tools=None, tool_choice=None, json_mode=False,
+                    json_schema=None):
     """Run exactly the selected free provider/model; never fail over."""
     try:
         targets = free_failover_targets(provider, model)
@@ -851,6 +920,7 @@ def chat_completion(messages, provider=None, model=None, system=None,
         messages, provider=target_provider, model=target_model, system=system,
         temperature=temperature, max_tokens=max_tokens, timeout=timeout,
         extra=extra, tools=tools, tool_choice=tool_choice,
+        json_mode=json_mode, json_schema=json_schema,
     )
     if text is None:
         return None, meta
@@ -872,6 +942,7 @@ def _chat_stream_once(messages, provider=None, model=None, system=None, temperat
     выполняется короткий «план рассуждений», затем основной ответ.
     """
     provider, model, cfg = resolve_target(provider, model)
+    system = language_policy.apply_to_system(system)
     want_reasoning = bool(reasoning)
 
     if provider == "local_demo":
@@ -889,6 +960,13 @@ def _chat_stream_once(messages, provider=None, model=None, system=None, temperat
         "max_tokens": int(max_tokens or cfg.get("max_tokens", 8192)),
         "stream": True,
     }
+    if provider == "openai_compatible":
+        # Local runtimes get the same optional features as hosted providers;
+        # unsupported fields are dropped automatically in _raw_stream.
+        payload.update(_local_request_options(model, reasoning=want_reasoning))
+        if os.getenv("LOCAL_LLM_STREAM_USAGE", "1") == "1":
+            # Token accounting while streaming, like Groq/OpenRouter provide.
+            payload["stream_options"] = {"include_usage": True}
     # Groq: параметры рассуждений по документации — reasoning_effort (строка)
     # и reasoning_format. Раньше уходило поле "reasoning": {"effort": ...} в
     # стиле OpenRouter: Groq мог ответить 400, и пользователь получал
@@ -906,8 +984,9 @@ def _chat_stream_once(messages, provider=None, model=None, system=None, temperat
         plan_messages = list(messages or []) + [{
             "role": "user",
             "content": (
-                "Перед ответом кратко (3-6 пунктов) распиши ход рассуждений: "
-                "что важно учесть, какие есть варианты, что проверить. Без вступлений."
+                "Before answering, outline your reasoning in 3-6 short bullet points: "
+                "what matters here, which options exist and what must be verified. "
+                "No preamble, no answer yet."
             ),
         }]
         plan_payload = dict(payload)
@@ -1033,37 +1112,40 @@ def _raw_stream(provider, model, payload, cfg, timeout):
     if provider != "groq":
         response, error = _managed_stream_request(
             provider, model, cfg["url"], payload, provider_headers(provider), timeout)
+        # Local runtimes differ in the optional fields they implement: retry
+        # once without whatever the server named in a 400 response.
+        if response is None and provider == "openai_compatible" and error:
+            fields = local_providers.rejected_fields(str(error))
+            stripped = local_providers.strip_fields(payload, fields)
+            if fields and stripped != payload:
+                logger.info("local stream rejected %s — retrying without them", fields)
+                response, error = _managed_stream_request(
+                    provider, model, cfg["url"], stripped, provider_headers(provider), timeout)
         if response is None:
             yield "error", error or f"Не удалось открыть поток от {provider}"
             return
         response.encoding = "utf-8"
         try:
-            for raw in response.iter_lines(decode_unicode=True):
-                if not raw:
-                    continue
-                line = raw.strip()
-                if line.startswith("data:"):
-                    line = line[5:].strip()
-                if line == "[DONE]":
+            # One parser for every local dialect: SSE, NDJSON, Ollama chat
+            # chunks and llama.cpp completion chunks, including reasoning
+            # deltas and streamed tool calls.
+            for kind, chunk in local_providers.iter_stream(response):
+                if kind in ("token", "reasoning"):
+                    yield kind, chunk
+                elif kind == "error":
+                    yield "error", str(chunk)
+                    return
+                elif kind == "done":
                     break
-                try:
-                    chunk = json.loads(line)
-                except (TypeError, ValueError):
-                    continue
-                choice = (chunk.get("choices") or [{}])[0]
-                delta = choice.get("delta") or {}
-                thought = delta.get("reasoning") or delta.get("reasoning_content") or ""
-                if thought:
-                    yield "reasoning", thought
-                token = delta.get("content") or choice.get("text") or ""
-                if token:
-                    yield "token", token
         except requests.exceptions.RequestException as exc:
             _mark_stream_key_failure(provider, model, response, exc)
             yield "error", f"Соединение с моделью прервано: {exc.__class__.__name__}"
             return
         finally:
-            response.close()
+            try:
+                response.close()
+            except Exception:                              # noqa: BLE001
+                pass
         return
 
     headers = provider_headers(provider)
@@ -1254,48 +1336,75 @@ def _local_model_fallback():
         normalize_model({
             "id": os.getenv("LOCAL_MODEL_ID", "local-llama"),
             "name": os.getenv("LOCAL_MODEL_NAME", "Local Llama (llama.cpp)"),
-            "description": "Локальная модель через llama-server / OpenAI-compatible API.",
+            "description": "Local model served by llama-server / an OpenAI-compatible API.",
             "context_length": int(os.getenv("LOCAL_MODEL_CONTEXT", "4096")),
             "pricing": {"prompt": "0", "completion": "0"},
         }, "openai_compatible"),
         normalize_model({
             "id": "llama.cpp",
             "name": "Llama.cpp Local",
-            "description": "Резервная запись для локального llama-server.",
+            "description": "Fallback entry for a local llama-server.",
             "context_length": 4096,
             "pricing": {"prompt": "0", "completion": "0"},
         }, "openai_compatible"),
     ]
+
 
 def _local_catalog_urls():
     """Возвращает /models endpoints для llama-server и совместимых API.
 
     FIX: раньше к базе вида http://host:8080/v1 добавлялся ещё и суффикс
     /v1/models, из-за чего каталог искался по несуществующему /v1/v1/models.
+    Список кандидатов теперь строит local_providers: у Ollama есть нативный
+    /api/tags, у LM Studio — /api/v0/models.
     """
-    from config import PROVIDERS
-    configured = (
-        os.getenv("OPENAI_COMPATIBLE_URL") or os.getenv("OPENAI_BASE_URL")
-        or PROVIDERS.get("openai_compatible", {}).get("url")
-        or "http://127.0.0.1:8080/v1/chat/completions"
-    ).strip().rstrip("/")
-    if configured.endswith("/chat/completions"):
-        base = configured[:-len("/chat/completions")].rstrip("/")
-    else:
-        base = configured
-    lowered = base.lower()
-    if ":11434" in lowered:
-        # Strip optional /v1 suffix before constructing Ollama native endpoints.
-        root = base[:-len("/v1")].rstrip("/") if base.lower().endswith("/v1") else base
-        candidates = [root + "/api/tags", root + "/v1/models"]
-    elif lowered.endswith("/api"):
-        root = base[:-len("/api")].rstrip("/")
-        candidates = [base + "/tags", root + "/v1/models"]
-    elif base.endswith("/v1"):
-        candidates = [base + "/models"]
-    else:
-        candidates = [base + "/models", base + "/v1/models"]
-    return list(dict.fromkeys(candidates))
+    try:
+        return local_providers.catalog_urls(local_providers.configured_base())
+    except Exception:                                      # noqa: BLE001
+        return []
+
+
+def _local_entry_to_model(entry: dict) -> dict:
+    """Local catalogue entry → the model card shape the settings UI expects."""
+    item = normalize_model({
+        "id": entry.get("id"),
+        "name": entry.get("name") or entry.get("id"),
+        "description": entry.get("description") or "",
+        "context_length": entry.get("context_length") or 0,
+        "pricing": {"prompt": "0", "completion": "0"},
+    }, "openai_compatible")
+    item.update({
+        "family": entry.get("family") or "",
+        "parameter_size": entry.get("parameter_size") or "",
+        "quantization": entry.get("quantization") or "",
+        "size_bytes": entry.get("size_bytes") or 0,
+        "loaded": bool(entry.get("loaded")),
+        "preset": entry.get("preset") or "",
+        "server": entry.get("server") or "",
+        "capabilities": entry.get("capabilities") or {},
+        "local": True,
+    })
+    return item
+
+
+def local_runtime_status(force: bool = False) -> dict:
+    """Состояние локального движка для панели настроек.
+
+    Возвращает пресеты (Ollama, LM Studio, llama.cpp, vLLM…), реальный адрес,
+    найденные модели с их возможностями и матрицу функций: streaming, tools,
+    JSON mode, reasoning, vision. Секрет (API-ключ) не отдаётся наружу.
+    """
+    import config
+    status = local_providers.status(force=force)
+    engine = dict(getattr(config, "local_engine", {}) or {})
+    status["engine"] = {
+        "preset": engine.get("preset") or "auto",
+        "base_url": engine.get("base_url") or "",
+        "has_key": bool(engine.get("api_key")),
+    }
+    status["answer_language"] = language_policy.current_language()
+    status["autodetect"] = bool(getattr(config, "LOCAL_LLM_AUTODETECT", False))
+    return status
 
 def fetch_available_models(provider, force=False):
     from config import PROVIDERS, MODEL_CACHE, has_credentials
@@ -1317,8 +1426,17 @@ def fetch_available_models(provider, force=False):
         # Публичный каталог Pollinations не требует ключа.
         urls = ["https://gen.pollinations.ai/v1/models"]
     elif provider == "openai_compatible":
-        # llama-server, Ollama, LM Studio, vLLM, LocalAI и другие
-        # OpenAI-compatible runtimes обычно отдают каталог через /v1/models.
+        # llama-server, Ollama, LM Studio, vLLM, LocalAI и другие.
+        # local_providers знает нативные каталоги (Ollama /api/tags,
+        # LM Studio /api/v0/models) и отдаёт контекст, семейство и возможности.
+        discovered = local_providers.discover(force=force)
+        if discovered.get("models"):
+            models = [_local_entry_to_model(entry) for entry in discovered["models"]]
+            MODEL_CACHE[provider] = models
+            MODEL_ERRORS.pop(provider, None)
+            return models
+        MODEL_ERRORS[provider] = "; ".join(discovered.get("errors", [])[-2:]) \
+            or "Local catalogue unavailable"
         urls = _local_catalog_urls()
     elif provider == "local_demo":
         import local_llm

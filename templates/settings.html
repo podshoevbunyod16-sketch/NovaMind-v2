@@ -30,6 +30,7 @@
         <a href="#media-section">🎨 Медиа</a>
         <a href="#search-section">🔎 Поиск</a>
         <a href="#speech-section">🔊 Озвучка</a>
+        <a href="#local-section">🖥️ Локальные модели</a>
         <a href="#language-section">🌐 Язык</a>
       </nav>
 
@@ -307,6 +308,49 @@
         </div>
       </section>
 
+      <!-- ══════════════ ЛОКАЛЬНЫЕ МОДЕЛИ ══════════════ -->
+      <section class="acc" data-accordion="local" id="local-section">
+        <button class="acc-head" type="button" data-accordion-toggle aria-expanded="false">
+          <span class="acc-ico" aria-hidden="true">🖥️</span>
+          <span class="acc-titles">
+            <span class="acc-title">Локальные модели</span>
+            <span class="acc-sub">Ollama, LM Studio, llama.cpp, vLLM, LocalAI — с теми же возможностями, что у облака</span>
+          </span>
+          <span class="acc-state" data-acc-state>Свёрнуто</span>
+          <span class="caret" aria-hidden="true">▼</span>
+        </button>
+        <div class="acc-panel" data-accordion-panel>
+          <div class="acc-body">
+            <div class="catalog-heading">
+              <div>
+                <h2>Свой сервер моделей</h2>
+                <p>NovaMind общается с локальными моделями по тому же OpenAI-совместимому протоколу, что и с Groq/OpenRouter: потоковые ответы, вызов инструментов, JSON-режим, рассуждения, vision и учёт токенов. Ключ большинству локальных серверов не нужен.</p>
+              </div>
+              <button class="refresh-btn" id="localRefresh" type="button">↻ Проверить</button>
+            </div>
+            <div class="mcp-connect-form">
+              <select id="localPreset" aria-label="Локальный сервер">
+                <option value="auto">Определить автоматически</option>
+                <option value="ollama">Ollama · :11434</option>
+                <option value="lmstudio">LM Studio · :1234</option>
+                <option value="llamacpp">llama.cpp (llama-server) · :8080</option>
+                <option value="vllm">vLLM · :8000</option>
+                <option value="localai">LocalAI · :8080</option>
+                <option value="jan">Jan · :1337</option>
+                <option value="koboldcpp">KoboldCpp · :5001</option>
+                <option value="textgenwebui">text-generation-webui · :5000</option>
+                <option value="openai">Другой OpenAI-совместимый сервер</option>
+              </select>
+              <input id="localBaseUrl" type="text" placeholder="http://127.0.0.1:11434/v1" spellcheck="false" autocomplete="off">
+              <input id="localApiKey" type="password" placeholder="API-ключ (необязательно, не показывается)" autocomplete="off">
+              <button class="refresh-btn" id="localSave" type="button">Сохранить и применить</button>
+            </div>
+            <div class="catalog-meta"><span id="localStatus">Проверяю локальный сервер…</span><span id="localPresetName"></span></div>
+            <div class="model-grid" id="localModels"><div class="empty-card loading-card">Загрузка локальных моделей…</div></div>
+          </div>
+        </div>
+      </section>
+
       <!-- ══════════════ ЯЗЫК (последний раздел) ══════════════ -->
       <section class="acc" data-accordion="language" id="language-section">
         <button class="acc-head" type="button" data-accordion-toggle aria-expanded="false">
@@ -323,7 +367,7 @@
             <div class="catalog-heading">
               <div>
                 <h2>Язык интерфейса</h2>
-                <p>Выберите язык: интерфейс, подсказки и сообщения переключаются сразу. Сообщения пользователя и ответы ИИ не переводятся.</p>
+                <p>Выберите язык: интерфейс, подсказки и сообщения переключаются сразу. Модель отвечает на этом же языке — промпты остаются английскими, а к системному промпту добавляется директива о языке ответа.</p>
               </div>
             </div>
             <div class="lang-grid" id="langGrid">
@@ -343,12 +387,12 @@
     </main>
   </div>
   <div class="toast" id="toast" role="status"></div>
-  <script src="/static/i18n.js?v=lang2"></script>
+  <script src="/static/i18n.js?v=lang4"></script>
   <script src="/static/accordion.js"></script>
   <script src="/static/tts.js"></script>
-  <script src="/static/settings.js?v=acc2"></script>
-  <script src="/static/mcp-settings.js?v=acc2"></script>
-  <script src="/static/skills-settings.js?v=acc2"></script>
+  <script src="/static/settings.js?v=acc4"></script>
+  <script src="/static/mcp-settings.js?v=acc4"></script>
+  <script src="/static/skills-settings.js?v=acc4"></script>
   <script src="/static/speech-settings.js?v=2"></script>
 </body>
 </html>

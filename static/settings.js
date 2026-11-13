@@ -344,3 +344,142 @@ async function loadSearchHealth(force = false) {
 }
 $('refreshHealth')?.addEventListener('click', () => loadSearchHealth(true));
 loadSearchHealth(false);
+
+/* ========== ЛОКАЛЬНЫЕ МОДЕЛИ ========== */
+/* Тот же протокол, что у облачных провайдеров, поэтому панель показывает не
+   только адрес, но и реальные возможности каждой локальной модели. */
+const localState = { status: null, presets: [] };
+
+function localCaps(item) {
+  const caps = item.capabilities || {};
+  const badges = [];
+  if (caps.tools) badges.push('tools');
+  if (caps.vision) badges.push('vision');
+  if (caps.reasoning) badges.push('reasoning');
+  if (caps.json_mode) badges.push('JSON');
+  if (caps.embeddings) badges.push('embeddings');
+  return badges;
+}
+
+function renderLocalModels(status) {
+  const grid = $('localModels');
+  const label = $('localStatus');
+  if (!grid || !label) return;
+  const models = status.models || [];
+  if (!status.reachable || !models.length) {
+    const hint = (status.errors || []).slice(-1)[0] || 'Сервер не ответил';
+    label.textContent = status.reachable
+      ? 'Сервер ответил, но моделей нет — загрузите модель в рантайме.'
+      : 'Локальный сервер недоступен: ' + hint;
+    grid.innerHTML = `<div class="empty-card error-card">${escapeHtml(hint)}
+      <br><small>Запустите Ollama, LM Studio или llama-server и нажмите «Проверить».</small></div>`;
+    return;
+  }
+  label.textContent = `${status.preset_name || status.preset} · ${models.length} моделей · ${status.base_url}`;
+  const presetName = $('localPresetName');
+  if (presetName) presetName.textContent = status.chat_url || '';
+  grid.innerHTML = models.map((model) => {
+    const badges = localCaps(model);
+    const ctx = model.context_length ? `${model.context_length} токенов` : 'контекст неизвестен';
+    return `
+      <div class="model-card">
+        <div class="model-card-top">
+          ${model.loaded ? '<span class="model-badge free">●</span>' : ''}
+          ${badges.map((badge) => `<span class="model-badge vision">${escapeHtml(badge)}</span>`).join('')}
+        </div>
+        <h3>${escapeHtml(model.name || model.id)}</h3>
+        <span class="model-id">${escapeHtml(model.id)}</span>
+        <p>${escapeHtml(model.description || '')}</p>
+        <div class="model-stats">
+          <span>Контекст <b>${escapeHtml(ctx)}</b></span>
+          <span>Сервер <b>${escapeHtml(model.preset || '')}</b></span>
+          <span>Выберите провайдера «OpenAI-compatible / Local» и эту модель в каталоге выше.</span>
+        </div>
+      </div>`;
+  }).join('');
+}
+
+function localPort(baseUrl) {
+  try { return new URL(baseUrl).port; } catch (_) { return ''; }
+}
+
+function renderLocalPresets(presets, current) {
+  const select = $('localPreset');
+  if (!select || !Array.isArray(presets) || !presets.length) return;
+  const autoLabel = (select.options[0] && select.options[0].textContent) || 'Определить автоматически';
+  select.innerHTML = `<option value="auto">${escapeHtml(autoLabel)}</option>` + presets.map((preset) => {
+    const port = localPort(preset.base_url);
+    const label = port ? `${preset.name} · :${port}` : preset.name;
+    return `<option value="${escapeHtml(preset.id)}">${escapeHtml(label)}</option>`;
+  }).join('');
+  if (current) select.value = current;
+}
+
+async function loadLocalStatus(force = false) {
+  const label = $('localStatus');
+  if (!label) return;
+  label.textContent = 'Проверяю локальный сервер…';
+  try {
+    const response = await fetch('/api/settings/local' + (force ? '?refresh=1' : ''));
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || ('HTTP ' + response.status));
+    localState.status = data;
+    localState.presets = data.presets || [];
+    renderLocalPresets(data.presets, data.engine && data.engine.preset);
+    if ($('localPreset') && data.engine) {
+      $('localPreset').value = data.engine.preset || 'auto';
+    }
+    if ($('localBaseUrl') && data.engine && data.engine.base_url) {
+      $('localBaseUrl').value = data.engine.base_url;
+    }
+    renderLocalModels(data);
+  } catch (error) {
+    label.textContent = 'Не удалось прочитать настройки локального движка: ' + error.message;
+  }
+}
+
+async function saveLocalEngine() {
+  const button = $('localSave');
+  if (!button) return;
+  const old = button.textContent;
+  button.disabled = true;
+  button.textContent = 'Сохраняю…';
+  try {
+    const response = await fetch('/api/settings/local', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        preset: $('localPreset')?.value || 'auto',
+        base_url: $('localBaseUrl')?.value || '',
+        api_key: $('localApiKey')?.value || '',
+      }),
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || ('HTTP ' + response.status));
+    showToast('Локальный сервер сохранён', 'success');
+    if ($('localApiKey')) $('localApiKey').value = '';
+    if (data.server) {
+      localState.status = data.server;
+      renderLocalModels(data.server);
+    }
+  } catch (error) {
+    showToast('Ошибка сохранения: ' + error.message, 'error');
+  } finally {
+    button.disabled = false;
+    button.textContent = old;
+  }
+}
+
+function initLocalModels() {
+  if (!$('localModels')) return;
+  $('localRefresh')?.addEventListener('click', () => loadLocalStatus(true));
+  $('localSave')?.addEventListener('click', saveLocalEngine);
+  $('localPreset')?.addEventListener('change', () => {
+    const preset = $('localPreset')?.value || 'auto';
+    const entry = (localState.presets || []).find((item) => item.id === preset);
+    if ($('localBaseUrl') && entry && entry.base_url) $('localBaseUrl').value = entry.base_url;
+  });
+  loadLocalStatus(false);
+}
+if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', initLocalModels);
+else initLocalModels();

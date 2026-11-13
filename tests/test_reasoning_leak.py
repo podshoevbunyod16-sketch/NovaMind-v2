@@ -109,7 +109,7 @@ def test_react_retries_once_after_reasoning_leak():
     result = run_react(AgentContext(GOAL, complete=complete, tools=[], emit=events.append))
     assert result.answer == GOOD
     assert len(seen) == 2
-    assert "Сформулируй только чистый" in str(seen[1])
+    assert "Write only the clean, complete answer" in str(seen[1])
     assert "We need answer" not in json.dumps(events, ensure_ascii=False)
 
 

@@ -13,7 +13,9 @@ def test_informational_answer_does_not_require_an_action_tool():
     assert verdict["missing"] == []
 
 
-def test_create_request_needs_successful_file_evidence():
+def test_create_request_needs_successful_file_evidence(monkeypatch):
+    import config
+    monkeypatch.setattr(config, "ui_language", "ru")
     verdict = verify_task("Создай файл отчёта", [])
     assert verdict["verified"] is False
     assert "подтверждение создания или изменения файла" in verdict["missing"]

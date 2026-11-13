@@ -82,7 +82,7 @@ def test_context_block_has_citations(kb):
     kb.ingest_text("Регламент отпусков", DOC, owner="u1", source="hr/policy.md")
     block, items = kb.context_block("как согласовать отпуск", owner="u1")
     assert "[K1]" in block
-    assert "ВНЕШНИЕ ДАННЫЕ" in block
+    assert "EXTERNAL DATA" in block
     assert items and items[0]["ref"] == "K1"
     assert items[0]["source"] == "hr/policy.md"
 

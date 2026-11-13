@@ -69,7 +69,7 @@ def test_long_truncated_answer_is_continued_and_not_duplicated():
         GOAL, complete=lambda messages, **kwargs: (seen.append(messages) or next(replies)),
         tools=[]))
     assert len(seen) == 2
-    assert "Продолжи незавершённый ответ" in str(seen[1])
+    assert "Continue the unfinished answer" in str(seen[1])
     assert result.answer.count("NovaMind устроен") == 30
     assert TAIL in result.answer
     assert "неполным" not in result.answer
@@ -111,13 +111,24 @@ def test_code_block_with_odd_quotes_is_not_cut_off():
 
 def test_react_prompt_requires_complete_evidence_based_answers():
     prompt = Path("prompts/base/react_agent.txt").read_text(encoding="utf-8")
-    assert "проверь результат наблюдаемым доказательством" in prompt
-    assert "что осталось невыполненным" in prompt
-    assert "Отвечай пользователю по-русски" in prompt
+    assert "verify the result with observable evidence" in prompt
+    assert "what remains unfinished" in prompt
+    # Промпт английский; язык ответа задаёт language_policy, а не файл промпта.
+    assert "ANSWER LANGUAGE directive" in prompt
+    assert "по-русски" not in prompt
 
 
-def test_offline_structure_answer_is_long_and_honest():
+def test_offline_structure_answer_is_long_and_honest(monkeypatch):
+    import config
+
+    monkeypatch.setattr(config, "ui_language", "ru")
     reply = local_llm.complete([{"role": "user", "content": GOAL}])
     assert len(reply) > 1500, len(reply)
     assert "agent/" in reply and "routes/" in reply and "static/" in reply
     assert "языковой модели нет" in reply.lower()
+
+    # Тот же ответ на английском интерфейсе — по-английски.
+    monkeypatch.setattr(config, "ui_language", "en")
+    reply_en = local_llm.complete([{"role": "user", "content": GOAL}])
+    assert "there is no language model" in reply_en.lower()
+    assert "agent/" in reply_en and "routes/" in reply_en

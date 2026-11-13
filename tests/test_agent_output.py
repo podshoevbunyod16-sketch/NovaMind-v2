@@ -57,7 +57,7 @@ def test_react_retries_once_for_a_clean_final_answer_and_never_emits_leak():
                                    tools=[], emit=events.append))
     assert result.answer == GOOD
     assert len(seen) == 2
-    assert "Сформулируй только чистый" in str(seen[1])
+    assert "Write only the clean, complete answer" in str(seen[1])
     assert "We need answer" not in str(events)
     assert any(event.get("type") == "result" and event.get("reply") == GOOD for event in events)
 

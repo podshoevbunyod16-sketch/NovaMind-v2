@@ -89,7 +89,7 @@ def test_search_stream_feeds_history_into_answer_and_keeps_it_in_db(client, sear
     assert _result(second).get("chat_id") == chat_id
 
     answer_body = search_world["bodies"][-1][0]["content"]
-    assert "Недавний разговор" in answer_body
+    assert "Recent conversation" in answer_body
     assert "Какой диаметр у Луны?" in answer_body
     assert "3474" in answer_body
 
@@ -135,9 +135,9 @@ def test_build_search_query_uses_conversation_context(monkeypatch):
     search_routes.build_search_query(
         "а его размер?", history=[{"role": "user", "content": "Какой диаметр у Луны?"}])
     prompt = seen[0][0]["content"]
-    assert "Контекст разговора" in prompt
+    assert "Conversation context" in prompt
     assert "Какой диаметр у Луны?" in prompt
-    assert "уточнение" in prompt
+    assert "refines the previous message" in prompt
 
 
 # ══════════════ агент: привязка chat_id из интерфейса ══════════════

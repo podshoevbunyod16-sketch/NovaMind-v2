@@ -484,7 +484,37 @@
     { ru: 'Ключ найден', tg: 'Калид ёфт шуд', en: 'Key found' },
     { ru: 'Ключ не найден', tg: 'Калид ёфт нашуд', en: 'Key not found' },
     { ru: 'Нет ключа в .env', tg: 'Дар .env калид нест', en: 'No key in .env' },
-    { ru: 'Ключ найден · каталог доступен', tg: 'Калид ёфт шуд · каталог дастрас аст', en: 'Key found · catalog available' },  ];
+    { ru: 'Ключ найден · каталог доступен', tg: 'Калид ёфт шуд · каталог дастрас аст', en: 'Key found · catalog available' },
+    // — локальные модели —
+    { ru: 'Локальные модели', tg: 'Моделҳои маҳаллӣ', en: 'Local models' },
+    { ru: 'Ollama, LM Studio, llama.cpp, vLLM, LocalAI — с теми же возможностями, что у облака', tg: 'Ollama, LM Studio, llama.cpp, vLLM, LocalAI — бо ҳамон имкониятҳое, ки дар абр ҳастанд', en: 'Ollama, LM Studio, llama.cpp, vLLM, LocalAI \u2014 with the same features as the cloud' },
+    { ru: 'Свой сервер моделей', tg: 'Сервери модели худӣ', en: 'Your own model server' },
+    { ru: 'NovaMind общается с локальными моделями по тому же OpenAI-совместимому протоколу, что и с Groq/OpenRouter: потоковые ответы, вызов инструментов, JSON-режим, рассуждения, vision и учёт токенов. Ключ большинству локальных серверов не нужен.', tg: 'NovaMind бо моделҳои маҳаллӣ бо ҳамон протоколи OpenAI-мувофиқ, ки бо Groq/OpenRouter, муошират мекунад: ҷавобҳои ҷараёнӣ, даъвати асбобҳо, реҷаи JSON, фикрронӣ, vision ва ҳисоби токенҳо. Ба аксари серверҳои маҳаллӣ калид лозим нест.', en: 'NovaMind talks to local models over the same OpenAI-compatible protocol as Groq/OpenRouter: streaming, tool calling, JSON mode, reasoning, vision and token accounting. Most local servers need no API key.' },
+    { ru: 'Определить автоматически', tg: 'Худкор муайян кардан', en: 'Detect automatically' },
+    { ru: 'Другой OpenAI-совместимый сервер', tg: 'Сервери дигари OpenAI-мувофиқ', en: 'Another OpenAI-compatible server' },
+    { ru: 'API-ключ (необязательно, не показывается)', tg: 'Калиди API (ихтиёрӣ, нишон дода намешавад)', en: 'API key (optional, never shown)' },
+    { ru: 'Сохранить и применить', tg: 'Нигоҳ доштан ва татбиқ кардан', en: 'Save and apply' },
+    { ru: 'Загрузка локальных моделей…', tg: 'Боркунии моделҳои маҳаллӣ…', en: 'Loading local models…' },
+    { ru: 'Проверяю локальный сервер…', tg: 'Сервери маҳаллиро месанҷам…', en: 'Checking the local server…' },
+    { ru: 'Локальный сервер сохранён', tg: 'Сервери маҳаллӣ нигоҳ дошта шуд', en: 'Local server saved' },
+    { ru: 'Сервер ответил, но моделей нет — загрузите модель в рантайме.', tg: 'Сервер ҷавоб дод, вале модел нест — моделро дар рантайм бор кунед.', en: 'The server answered but has no models \u2014 load a model in the runtime.' },
+    { ru: 'Запустите Ollama, LM Studio или llama-server и нажмите «Проверить».', tg: 'Ollama, LM Studio ё llama-server-ро ба кор дароред ва «Санҷидан»-ро пахш кунед.', en: 'Start Ollama, LM Studio or llama-server, then click \u201cCheck\u201d.' },
+    { ru: 'Выберите провайдера «OpenAI-compatible / Local» и эту модель в каталоге выше.', tg: 'Провайдери «OpenAI-compatible / Local» ва ин моделро дар каталоги боло интихоб кунед.', en: 'Pick the \u201cOpenAI-compatible / Local\u201d provider and this model in the catalogue above.' },
+    { ru: 'Сохраняю…', tg: 'Нигоҳ медорам…', en: 'Saving…' },
+    { ru: 'Контекст', tg: 'Контекст', en: 'Context' },
+    { ru: 'Бесплатный тариф, нужен GROQ_API_KEY', tg: 'Тарифи ройгон, GROQ_API_KEY лозим аст', en: 'Free tier, GROQ_API_KEY required' },
+    { ru: 'Нужен CEREBRAS_API_KEY', tg: 'CEREBRAS_API_KEY лозим аст', en: 'CEREBRAS_API_KEY required' },
+    { ru: 'Нужен OPENROUTER_API_KEY', tg: 'OPENROUTER_API_KEY лозим аст', en: 'OPENROUTER_API_KEY required' },
+    { ru: 'Нужен GEMINI_API_KEY', tg: 'GEMINI_API_KEY лозим аст', en: 'GEMINI_API_KEY required' },
+    { ru: 'Каталог публичный; для генерации нужен POLLINATIONS_API_KEY', tg: 'Каталог оммавӣ аст; барои генератсия POLLINATIONS_API_KEY лозим аст', en: 'Public catalogue; POLLINATIONS_API_KEY is required to generate' },
+    { ru: 'Локальный llama-server / Ollama, ключ не обязателен', tg: 'llama-server / Ollama-и маҳаллӣ, калид ҳатмӣ нест', en: 'Local llama-server / Ollama, no API key required' },
+    { ru: 'Встроенная офлайн-модель: работает всегда, без сети и ключей', tg: 'Модели офлайнии дарунсохт: ҳамеша кор мекунад, бе шабака ва калидҳо', en: 'Built-in offline helper: always works, no network or keys' },
+    { ru: 'Выберите язык: интерфейс, подсказки и сообщения переключаются сразу. Модель отвечает на этом же языке — промпты остаются английскими, а к системному промпту добавляется директива о языке ответа.', tg: 'Забонро интихоб кунед: интерфейс, маслиҳатҳо ва паёмҳо фавран иваз мешаванд. Модел бо ҳамин забон ҷавоб медиҳад — промптҳо англисӣ мемонанд ва ба промпти системавӣ дастури забони ҷавоб илова мешавад.', en: 'Pick a language: the interface, hints and messages switch at once. The model answers in the same language \u2014 prompts stay English and an answer-language directive is appended to the system prompt.' },
+    { ru: 'Сервер не ответил', tg: 'Сервер ҷавоб надод', en: 'The server did not answer' },
+    { ru: 'Сервер', tg: 'Сервер', en: 'Server' },
+    { ru: 'контекст неизвестен', tg: 'контекст номаълум', en: 'context unknown' },
+    { ru: 'токенов', tg: 'токен', en: 'tokens' },
+  ];
 
   // Индексы: любая строка на любом из трёх языков → запись словаря.
   const INDEX = new Map();
@@ -520,6 +550,17 @@
     { re: /^(\d+) моделей$/, tg: (m) => `${m[1]} модель`, en: (m) => `${m[1]} models` },
     { re: /^Нажмите «Выбрать», чтобы использовать модель в чате$/,
       tg: () => 'Барои истифодаи модель дар чат «Интихоб»-ро пахш кунед', en: () => 'Click \u201cSelect\u201d to use the model in chat' },
+    { re: /^Локальный сервер недоступен: (.+)$/,
+      tg: (m) => `Сервери маҳаллӣ дастрас нест: ${m[1]}`, en: (m) => `The local server is unreachable: ${m[1]}` },
+    { re: /^Не удалось прочитать настройки локального движка: (.+)$/,
+      tg: (m) => `Танзимоти муҳаррики маҳаллиро хондан муяссар нашуд: ${m[1]}`,
+      en: (m) => `Could not read the local engine settings: ${m[1]}` },
+    { re: /^Ошибка сохранения: (.+)$/,
+      tg: (m) => `Хатои нигоҳдорӣ: ${m[1]}`, en: (m) => `Save failed: ${m[1]}` },
+    { re: /^(\d+) токенов$/,
+      tg: (m) => `${m[1]} токен`, en: (m) => `${m[1]} tokens` },
+    { re: /^(.+) · (\d+) моделей · (.+)$/,
+      tg: (m) => `${m[1]} · ${m[2]} модел · ${m[3]}`, en: (m) => `${m[1]} · ${m[2]} models · ${m[3]}` },
   ];
 
   // ─────────────────────────── движок ───────────────────────────
@@ -615,7 +656,9 @@
   });
 
   function paintLangButtons() {
-    document.querySelectorAll('[data-lang]').forEach((el) => {
+    // Только кнопки выбора языка: атрибут data-lang есть и у блоков кода
+    // (подсветка синтаксиса), их трогать нельзя.
+    document.querySelectorAll('button[data-lang]').forEach((el) => {
       el.classList.toggle('active', el.dataset.lang === lang);
     });
   }
@@ -657,7 +700,7 @@
     }
     translateTree(document.body);
     document.addEventListener('click', (event) => {
-      const button = event.target.closest('[data-lang]');
+      const button = event.target.closest('button[data-lang]');
       if (button) setLang(button.dataset.lang);
     });
     observer.observe(document.body, {

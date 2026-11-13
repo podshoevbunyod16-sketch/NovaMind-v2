@@ -40,14 +40,15 @@ def run(args):
         "Content-Type": "application/json"
     }
 
-    prompt = """Внимательно посмотри на это изображение и подробно опиши:
-1. Что изображено (главные объекты, люди, животные, предметы)
-2. Цветовая гамма и освещение
-3. Настроение и атмосфера
-4. Возможный контекст или место действия
-5. Любые интересные детали или текст, если он есть
+    prompt = """Look at this image carefully and describe it in detail:
+1. What it shows (main objects, people, animals, items)
+2. Colour palette and lighting
+3. Mood and atmosphere
+4. The likely context or location
+5. Any interesting details or visible text
 
-Отвечай на русском языке, развернуто, но без лишних слов."""
+Answer in the language required by the ANSWER LANGUAGE directive, thoroughly but
+without filler."""
 
     payload = {
         "model": "google/gemini-2.5-flash",

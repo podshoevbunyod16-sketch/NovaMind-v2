@@ -123,9 +123,9 @@ class MockHandler(BaseHTTPRequestHandler):
         if payload.get("stream"):
             chunks = []
             # «План рассуждений» для предпрохода и обычный ответ различаются по промпту.
-            if "ход рассуждений" in question:
-                text = "План: проверить источник, затем вывести цену."
-            elif "12 500" in question or "Данные из интернета" in question:
+            if "outline your reasoning" in question:
+                text = "Plan: check the source first, then state the price."
+            elif "12 500" in question or "Web data" in question:
                 text = "По данным источников: 12 500 рублей, доставка 3 дня."
             else:
                 text = f"Локальный ответ на: {question[:40]}"
@@ -268,7 +268,7 @@ def test_reasoning_prepass_streams_before_answer(local_runtime):
             reasoning.append(chunk)
         elif kind == "token":
             answer.append(chunk)
-    assert "".join(reasoning).startswith("План:")
+    assert "".join(reasoning).startswith("Plan:")
     assert "Локальный ответ" in "".join(answer)
     assert kinds.index("reasoning") < kinds.index("token")
     assert kinds[-1] == "done"
@@ -288,6 +288,10 @@ def test_clean_prompt_strips_context_blocks():
     assert local_llm.clean_prompt(
         "Вопрос: курс доллара\n\nДанные из интернета:\n### [1] Источник"
     ) == "курс доллара"
+    # English prompt scaffolding is stripped as well (prompts are English now).
+    assert local_llm.clean_prompt(
+        "Question: dollar rate\n\nWeb data:\n### [1] Source"
+    ) == "dollar rate"
 
 
 def test_missing_groq_keys_do_not_switch_to_offline_provider(monkeypatch):

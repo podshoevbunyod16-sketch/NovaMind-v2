@@ -53,6 +53,16 @@ def isolated_env(tmp_path, monkeypatch):
 
     import config
     monkeypatch.setattr(config, "RUNTIME_SETTINGS_FILE", str(tmp_path / "runtime_settings.json"))
+    # Локальный движок — глобальное состояние: без сброса один тест оставлял
+    # адрес Ollama следующему (и каталог моделей искался не там).
+    monkeypatch.setattr(config, "local_engine",
+                        {"preset": "auto", "base_url": "", "api_key": ""})
+    # Язык интерфейса — тоже глобальное состояние; ответы моделей зависят от него.
+    monkeypatch.setattr(config, "ui_language", "tg")
+    config.apply_local_engine(config.local_engine)
+    import local_providers
+    local_providers._CATALOG_CACHE.clear()
+    local_providers._SHOW_CACHE.clear()
     config.save_selected_media_model({})
     # Настройки озвучки живут в глобальном объекте config: без сброса один тест
     # «выбирал» модель для следующего (и тот падал на чужом провайдере).

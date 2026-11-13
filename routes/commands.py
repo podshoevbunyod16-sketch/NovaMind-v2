@@ -128,9 +128,10 @@ def handle_command():
             return jsonify({'error': 'Укажите, какой код создать'})
 
         reply, meta = chat_completion(
-            [{"role": "user", "content": f"Напиши код: {query}"}],
+            [{"role": "user", "content": f"Write code: {query}"}],
             provider=config.current_provider, model=config.current_model,
-            system="Ты программист. Пиши чистый код с комментариями.",
+            system=("You are a senior software engineer. Write clean, runnable code with "
+                    "concise comments; explain trade-offs only when they matter."),
             temperature=0.3, max_tokens=3000, timeout=60,
         )
         if reply is None:

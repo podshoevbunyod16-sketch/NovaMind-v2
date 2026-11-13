@@ -212,6 +212,7 @@ def _offline(text):
 def test_offline_arithmetic_is_real():
     assert "**4**" in _offline("2+2")
     assert "**30**" in _offline("15% от 200")
+    assert "**30**" in _offline("15% of 200")
 
 
 def test_offline_units_are_real():
@@ -226,11 +227,25 @@ def test_offline_text_tools_are_real():
     assert '"a": 1' in _offline('json: {"a":1}')
 
 
-def test_offline_is_honest_about_not_being_a_model():
+def test_offline_is_honest_about_not_being_a_model(monkeypatch):
+    """Офлайн-ответ честен и написан на языке интерфейса."""
+    import config
+
+    monkeypatch.setattr(config, "ui_language", "ru")
     reply = _offline("как приготовить плов")
     assert "языковой модели нет" in reply.lower()
     assert "токенов" not in reply.lower()          # старой заглушки больше нет
     assert "GROQ_API_KEY" in reply                 # и есть инструкция, что подключить
+
+    monkeypatch.setattr(config, "ui_language", "en")
+    reply_en = _offline("how to cook pilaf")
+    assert "there is no language model" in reply_en.lower()
+    assert "GROQ_API_KEY" in reply_en
+    assert "языковой модели" not in reply_en.lower()
+
+    monkeypatch.setattr(config, "ui_language", "tg")
+    reply_tg = _offline("чӣ тавр палав пухтан")
+    assert "модели забонӣ нест" in reply_tg.lower()
 
 
 def test_offline_datetime_is_real():
