@@ -373,7 +373,7 @@ class ProviderManager:
                 log_event("warning", "request_failed", provider=provider, model=model,
                           key_index=key.index, kind=exc.kind.value,
                           reason=redact(str(exc), [key.key]), attempt=attempt + 1)
-                if not exc.retry_on_other_key:
+                if not exc.retry_on_other_key or attempt + 1 >= attempts:
                     break
                 self._sleep(backoff_delay(attempt, exc.retry_after))
                 continue
@@ -386,7 +386,7 @@ class ProviderManager:
                 log_event("warning", "request_failed", provider=provider, model=model,
                           key_index=key.index, kind=kind.value,
                           reason=redact(str(exc), [key.key]), attempt=attempt + 1)
-                if not perr.retry_on_other_key:
+                if not perr.retry_on_other_key or attempt + 1 >= attempts:
                     break
                 self._sleep(backoff_delay(attempt))
                 continue

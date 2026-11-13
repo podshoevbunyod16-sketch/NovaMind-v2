@@ -108,6 +108,31 @@ def test_execute_bounded_and_no_key_reuse():
     assert sorted(seen) == [0, 1]
 
 
+def test_chat_completion_max_attempts_one_skips_rotation_and_final_backoff(monkeypatch):
+    import ai_providers
+
+    sleeps = []
+    manager = pm.ProviderManager(sleep=sleeps.append)
+    manager.register_provider("openrouter", keys=["key-a", "key-b"])
+    monkeypatch.setattr(ai_providers, "_PM", manager)
+    requests_made = []
+
+    def timeout_request(_url, **_kwargs):
+        requests_made.append(True)
+        raise requests.Timeout("model timed out")
+
+    monkeypatch.setattr(ai_providers.requests, "post", timeout_request)
+    text, error = ai_providers.chat_completion(
+        [{"role": "user", "content": "answer briefly"}],
+        provider="openrouter", model="openai/gpt-oss-120b:free",
+        timeout=1, max_attempts=1,
+    )
+
+    assert text is None and "Таймаут" in error
+    assert len(requests_made) == 1
+    assert sleeps == []
+
+
 def test_execute_stops_immediately_on_non_retryable_error():
     manager = make_manager()
     calls = []
@@ -395,4 +420,3 @@ def test_groq_rotation_loads_base_and_numbered_keys_together(monkeypatch):
     assert [(item["index"], item["key"]) for item in keys] == [
         (0, "base-key"), (1, "numbered-key")
     ]
-
