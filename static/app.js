@@ -212,12 +212,12 @@ function setWebSearch(state, silent = false) {
   btn?.classList.toggle('active', state);
   btn?.classList.toggle('is-live', state);
   const label = document.getElementById('searchBtnText');
-  if (label) label.textContent = state ? 'Поиск вкл' : 'Поиск';
+  if (label) label.textContent = state ? 'Инструменты вкл' : 'Инструменты';
   btn?.setAttribute('aria-pressed', state ? 'true' : 'false');
   if (!silent) {
     showNotification(state
-      ? '🔍 Автопоиск включён — агент работает инструментами: поиск, Linux-команды, файлы'
-      : 'Автопоиск выключен — без инструментов, запрос уходит прямо в ИИ-модель',
+      ? 'Инструменты включены: агент сам решает, нужен ли поиск, медиа или терминал.'
+      : 'Инструменты выключены — отвечает только модель.',
       state ? 'ok' : 'info');
   }
 }
@@ -387,6 +387,7 @@ function mediaBubbleHtml(payload) {
       <div class="media-title">${escapeHtml(title)}${provider}${seconds}</div>
       ${player}
       <div class="media-actions">
+        ${editImageButton(payload)}
         <a class="media-download" href="${escapeHtml(url)}" download="${escapeHtml(downloadName)}">⬇ Скачать</a>
         <a href="${escapeHtml(url)}" target="_blank" rel="noopener">Открыть в новой вкладке</a>
       </div>
@@ -407,11 +408,17 @@ function turnMediaPlayer(item) {
   return `<a class="turn-media-open" href="${url}" target="_blank" rel="noopener"><img src="${url}" alt="${alt}" loading="lazy"></a>`;
 }
 
+function editImageButton(item) {
+  return item.kind === 'image' && item.editable && item.filename
+    ? `<button type="button" class="turn-image-edit" data-edit-image="${escapeHtml(item.filename)}">Изменить</button>` : '';
+}
+
 function turnMediaCaption(item) {
   const bits = [`${MEDIA_ICON[item.kind] || '✦'} ${escapeHtml(item.model_name || item.model || 'ИИ')}`];
   if (item.elapsed_ms) bits.push(`${(item.elapsed_ms / 1000).toFixed(1)} c`);
   const name = escapeHtml(item.filename || `novamind_${item.kind || 'media'}`);
   return `<figcaption><span class="turn-media-meta">${bits.join(' · ')}</span>`
+    + editImageButton(item)
     + `<a class="turn-media-dl" href="${escapeHtml(item.url || '')}" download="${name}" title="Скачать">⬇ Скачать</a></figcaption>`;
 }
 
@@ -809,7 +816,7 @@ function createAssistantTurn(options = {}) {
       const box = api.ensureTerm();
       // Блок появляется ещё на рассуждении; «Работа в Linux» — только когда
       // реально выполнилась команда в окружении.
-      if (window.Linux && window.Linux.hasLinux && window.Linux.hasLinux()) {
+      if (['terminal', 'shell', 'bash', 'python', 'git', 'file_read', 'file_write', 'file_edit', 'file_delete', 'file_tree', 'file_search', 'file_list'].includes(event.name)) {
         const title = box.querySelector('.agent-term-title');
         if (title) title.textContent = 'Работа в Linux';
       }
@@ -1405,7 +1412,7 @@ function createAssistantTurn(options = {}) {
       if (meta.provider) bits.push(escapeHtml(meta.provider));
       if (meta.offline) bits.push('офлайн');
       if (meta.searched) bits.push('с поиском');
-      if (meta.agent || meta.linux) bits.push('Linux');
+      if (meta.linux) bits.push('Linux');
       if (meta.steps) bits.push(`шагов: ${meta.steps}`);
       if (meta.usage && meta.usage.total_tokens) {
         bits.push(`токенов: ${formatTokens(meta.usage.total_tokens)}`
@@ -1882,8 +1889,13 @@ async function sendMessage(text) {
   const msg = String(text ?? input.value).trim();
   if (!msg) return;
 
+  const imageMode = inputMode?.imageTask ? inputMode : null;
+  if (imageMode && !autoSearchEnabled()) {
+    showNotification('Для генерации включите «Инструменты».', 'warn');
+    return;
+  }
   let finalMsg = msg;
-  if (inputMode && !msg.startsWith('/')) {
+  if (inputMode && (imageMode || !msg.startsWith('/'))) {
     finalMsg = inputMode.prefix + msg;
     clearInputMode(true);
   }
@@ -1924,15 +1936,22 @@ async function sendMessage(text) {
 
     // ── Главный чат: ИИ-агент ──
     // ИИ сам решает, что делать: ответить сразу, поискать, нарисовать картинку,
-    // озвучить текст, сделать видео или поработать в Linux по шагам.
-    // Модель генерации медиа тоже выбирает он — кнопок выбора нет.
+    // озвучить текст или поработать в Linux с учётом наблюдений.
     if (window.Linux && typeof window.Linux.runTurn === 'function') {
       const handled = await window.Linux.runTurn(finalMsg, {
-        search: autoSearchEnabled(),
         tools: autoSearchEnabled(),
+        imageModel: window.ChatImages?.selection(),
+        imageFile: imageMode?.imageFile,
+        imageSource: imageMode?.imageSource,
         reasoning: reasoningOn,
       });
       if (handled) return;
+    }
+
+    if (imageMode) {
+      const turn = createAssistantTurn();
+      turn.fail('Агент недоступен. Запрос на изображение не отправлен.');
+      return;
     }
 
     // ── Запасной путь без окружения: поиск в интернете ──
@@ -2551,6 +2570,7 @@ function setActive(el) {
 
 // ========== ЧАТ ==========
 function newChat() {
+  window.toggleWorkspace?.(false);
   if (window.NovaSpeech) window.NovaSpeech.onChatChanged();
   const store = historyLoad();
   store.activeId = null;
@@ -2786,6 +2806,8 @@ function loadChat(chatId) {
   const chat = store.chats.find((c) => c.id === chatId);
   if (!chat) return;
 
+  window.toggleWorkspace?.(false);
+  if (inputMode?.imageTask) clearInputMode(true);
   store.activeId = chatId;
   store.resetServer = false;
   historySave(store);
@@ -2921,7 +2943,7 @@ function loadChatList() {
 // КОМАНДНАЯ ПАНЕЛЬ (Ctrl+K)
 // ══════════════════════════════════════════
 const CMDK_ACTIONS = [
-  { icon: '🔍', label: 'Включить/выключить поиск в интернете', hint: '', run: () => toggleWebSearch() },
+  { icon: '🔍', label: 'Включить/выключить инструменты', hint: '', run: () => toggleWebSearch() },
   { icon: '🧠', label: 'Включить/выключить рассуждения', hint: '', run: () => toggleReasoning() },
   { icon: '✖️', label: 'Выключить активный режим', hint: '', run: () => clearInputMode() },
   { icon: '✨', label: 'Спокойный режим анимаций', hint: '', run: () => toggleCalmMotion() },

@@ -96,7 +96,7 @@ _SECRET_PATTERN = re.compile(
 #: Новые имена таймлайна → проверенные имена политики. Терминал остаётся
 #: ``bash`` для правил и опасных шаблонов: переименование шага в UI не должно
 #: открывать ``git push`` без подтверждения.
-_POLICY_ALIASES = {"terminal": "bash", "shell": "bash", "web_fetch": "web_open",
+_POLICY_ALIASES = {"terminal": "bash", "shell": "bash", "python": "bash", "web_fetch": "web_open",
                    "file_find": "file_finder"}
 
 

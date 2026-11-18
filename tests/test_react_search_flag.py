@@ -1,8 +1,8 @@
-"""Кнопка «Автопоиск» должна включать принудительный веб-поиск react-агента."""
+"""Явный запрос веб-поиска и разрешение использовать инструменты — разные флаги."""
 from routes.react_agent import _search_flag
 
 
-def test_frontend_sends_search_key():
+def test_explicit_search_preference():
     assert _search_flag({"search": True, "tools": True}) is True
 
 
@@ -14,6 +14,7 @@ def test_search_off_or_missing():
     assert _search_flag({"search": False, "tools": False}) is False
     assert _search_flag({"message": "hi"}) is False
     assert _search_flag(None) is False
+    assert _search_flag({"tools": True}) is False
 
 
 def test_react_route_is_bound_to_start_react_run():

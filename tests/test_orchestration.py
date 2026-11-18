@@ -64,28 +64,26 @@ def test_no_specialist_roles_or_parallel_branches_are_created():
     assert not any(role in seen[0].lower() for role in ("researcher", "analyst", "critic", "planner"))
 
 
-def test_multiple_tool_calls_in_one_model_response_are_serialized():
-    calls = []
-    replies = iter([
-        ("обычный ответ", {"tool_calls": [
-            {"function": {"name": "lookup_a", "arguments": {"query": "x"}}},
-            {"function": {"name": "lookup_b", "arguments": {"query": "y"}}},
-        ]}),
-        ("Оба инструмента вызваны последовательно.", {}),
-    ])
-    request_count = []
-
+def test_model_reconsiders_a_batch_after_the_first_observation():
+    actions = []
     def complete(messages, **kwargs):
-        request_count.append(messages)
-        if len(request_count) == 2:
-            transcript = str(messages)
-            assert "lookup_a" in transcript and "lookup_b" in transcript
-        return next(replies)
+        if not actions:
+            return "", {"tool_calls": [
+                {"name": "lookup_a", "arguments": {"query": "first"}},
+                {"name": "lookup_b", "arguments": {"query": "speculative"}},
+            ]}
+        if len(actions) == 1:
+            # The second query must come from A, not the model's initial plan.
+            assert "key_from_A" in messages[-1]["content"]
+            return "", {"tool_calls": [{"name": "lookup_b", "arguments": {"query": "key_from_A"}}]}
+        assert "value_from_B" in messages[-1]["content"]
+        return "Нашёл значение B.", {}
 
-    result = run_react(AgentContext(
-        "Собери факты", complete=complete,
-        tools=[_tool("lookup_a"), _tool("lookup_b")],
-        call_tool=lambda name, **kwargs: calls.append(name) or {"ok": True, "result": name}))
-    assert calls == ["lookup_a", "lookup_b"]
-    assert len(request_count) == 2
-    assert result.steps == 2
+    def execute(name, query):
+        actions.append((name, query))
+        return {"ok": True, "result": "key_from_A" if name == "lookup_a" else "value_from_B"}
+
+    result = run_react(AgentContext("Собери факты", complete=complete,
+                       tools=[_tool("lookup_a"), _tool("lookup_b")], call_tool=execute))
+    assert actions == [("lookup_a", "first"), ("lookup_b", "key_from_A")]
+    assert result.steps == 2 and result.answer == "Нашёл значение B."

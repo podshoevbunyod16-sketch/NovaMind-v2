@@ -273,10 +273,10 @@ def test_agent_reports_empty_search(admin_client, sandbox, monkeypatch):
 
 # ══════════════ кнопка «Поиск» (автопоиск) ══════════════
 
-def test_search_button_runs_first_party_search_before_model(google_client, sandbox, monkeypatch, web):
-    """search=true запускает web_search через реестр до синтеза единственным провайдером."""
+def test_explicit_search_is_selected_by_model(google_client, sandbox, monkeypatch, web):
+    """Модель видит запрос на поиск, формулирует запрос и получает реальные источники."""
     seen = []
-    script(monkeypatch, ["Цена — 12 500 ₽ [1], подробности [2]."], seen)
+    script(monkeypatch, ["```web_search\nasyncio price\n```", "Цена — 12 500 ₽ [1], подробности [2]."], seen)
     events = ndjson(google_client.post("/api/agent/stream",
                                        json={"message": "сколько стоит asyncio?", "auto_search": True}))
     kinds = [event["type"] for event in events]
@@ -295,12 +295,14 @@ def test_search_button_runs_first_party_search_before_model(google_client, sandb
     result = next(event for event in events if event["type"] == "result")
     assert result["searched"] is True and len(result["sources"]) == 3
     assert "12 500" in answer_of(events)
-    assert len(seen) == 1
+    assert len(seen) == 2
+    assert "requested web research" in model_text(seen, 0)
 
 
 def test_search_button_can_search_again(google_client, sandbox, monkeypatch, web):
     """Кнопка + собственный блок модели: два поиска, источники без дублей."""
     script(monkeypatch, [
+        "```web_search\nasyncio changes\n```",
         "```web_search\nasyncio 3.13 changes\n```",
         "Итог по двум поискам [1]",
     ])
@@ -315,7 +317,7 @@ def test_search_button_can_search_again(google_client, sandbox, monkeypatch, web
 def test_search_button_with_empty_results(google_client, sandbox, monkeypatch):
     monkeypatch.setattr(search_routes, "search_web", lambda query, num=8, **kw: ([], []))
     seen = []
-    script(monkeypatch, ["Отвечу из базы знаний"], seen)
+    script(monkeypatch, ["```web_search\nредкий факт\n```", "Отвечу из базы знаний"], seen)
     events = ndjson(google_client.post("/api/agent/stream",
                                        json={"message": "редкий вопрос", "auto_search": True}))
     assert any(event["type"] == "step" and "ничего не дал" in event["text"] for event in events)
@@ -325,7 +327,7 @@ def test_search_button_with_empty_results(google_client, sandbox, monkeypatch):
 
 def test_search_button_works_without_workspace(client, monkeypatch, web):
     """Гость: поиск и чтение страниц работают, заметка в папку не пишется."""
-    script(monkeypatch, ["Готово"])
+    script(monkeypatch, ["```web_search\nasyncio\n```", "Готово"])
     events = ndjson(client.post("/api/agent/stream",
                                 json={"message": "найди asyncio", "auto_search": True}))
     assert events_of(events, "tool")[0]["name"] == "web_search"

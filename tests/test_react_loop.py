@@ -1,6 +1,8 @@
 import json
 import threading
 
+import pytest
+
 from agent.loop import AgentContext, run_react
 from tool_registry import ToolSpec
 
@@ -185,3 +187,24 @@ def test_tool_handler_typeerror_is_not_retried_as_a_second_call():
 
     assert calls == ["write_once"]
     assert result.observations[0]["result"]["ok"] is False
+
+
+@pytest.mark.parametrize('premature', ['Готово, файл создан.', 'План: сначала создам файл, затем проверю его.'])
+def test_premature_success_or_plan_is_reconsidered_and_last_action_can_be_verified(premature):
+    events, offered = [], []
+    spec = ToolSpec('file_write', 'Write a file', {'type': 'object', 'properties': {}}, lambda: {'ok': True})
+    def complete(messages, **options):
+        offered.append(options['tools'])
+        if len(offered) == 1:
+            return premature, {}
+        if len(offered) == 2:
+            assert 'not supported by the observations' in messages[-1]['content']
+            return '{"tool":"file_write","arguments":{}}', {}
+        assert 'note-7.txt' in messages[-1]['content']
+        return 'Создан файл note-7.txt.', {}
+    result = run_react(AgentContext('Создай файл', complete=complete, emit=events.append, tools=[spec],
+                       call_tool=lambda name: {'ok': True, 'path': 'note-7.txt'}, workspace=True, max_steps=1))
+    assert len(offered) == 3 and offered[-1] is None
+    assert all(call[0]['function']['name'] == 'file_write' for call in offered[:2])
+    assert result.steps == 1 and result.status == 'completed'
+    assert [e['token'] for e in events if e['type'] == 'token'] == ['Создан файл note-7.txt.']

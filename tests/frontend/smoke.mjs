@@ -101,7 +101,7 @@ const AGENT_STREAM = [
                            steps: [{ title: '$ python3 hello.py', status: 'done', log: 'ок' }] } },
   { type: 'token', token: 'Скрипт отработал: ' },
   { type: 'token', token: '**привет из папки**.' },
-  { type: 'result', reply: 'Скрипт отработал: привет из папки.', steps: 2, task_id: 'task-1', model: 'mock-model' },
+  { type: 'result', reply: 'Скрипт отработал: привет из папки.', linux: true, steps: 2, task_id: 'task-1', model: 'mock-model' },
   { type: 'done' },
 ];
 
@@ -185,11 +185,11 @@ const LINUX_SEARCH_STREAM = [
 const IMAGE_STREAM = [
   { type: 'stage', scene: 'media', title: 'Рисую изображение', text: 'a red fox in a snowy forest, watercolor' },
   { type: 'step', icon: '🎨', text: 'Пробую Pollinations Flux (Pollinations)' },
-  { type: 'media', media: { kind: 'image', url: '/media/fox.png', filename: 'fox.png', mime: 'image/png',
+  { type: 'media', media: { kind: 'image', url: '/media/fox.png', filename: 'fox.png', editable: true, mime: 'image/png',
     model: 'flux', model_name: 'Pollinations Flux', provider_name: 'Pollinations', elapsed_ms: 2300,
     prompt: 'a red fox in a snowy forest, watercolor' } },
   { type: 'token', token: 'Готово! Нарисовал лисичку в зимнем лесу.' },
-  { type: 'result', reply: 'Готово! Нарисовал лисичку в зимнем лесу.', steps: 1, linux: false, model: 'mock-model',
+  { type: 'result', reply: 'Готово! Нарисовал лисичку в зимнем лесу.', chat_id: 'fixture-chat', steps: 1, linux: false, model: 'mock-model',
     media: [{ kind: 'image', url: '/media/fox.png' }] },
   { type: 'done' },
 ];
@@ -299,13 +299,15 @@ const pageHtml = await (await fetch(BASE + '/chat')).text();
 // ровно тем содержимым, которое отдаёт сервер.
 const appJs = await (await fetch(BASE + '/static/app.js')).text();
 const linuxJs = await (await fetch(BASE + '/static/linux.js')).text();
+const chatImagesJs = await (await fetch(BASE + '/static/chat-images.js')).text();
+const workspaceJs = await (await fetch(BASE + '/static/workspace.js')).text();
 const ttsJs = await (await fetch(BASE + '/static/tts.js')).text();
 // Функция-заменитель, а не строка: в app.js есть '$' + ... — иначе String.replace
 // принимает «$'» за вставку остатка страницы и ломает инлайн-скрипт.
 // Скрипты подключаются с версией (?v=…), поэтому встраиваем их по регулярке.
 const html = (() => {
   let page = pageHtml;
-  const code = { 'app': appJs, 'linux': linuxJs, 'tts': ttsJs };
+  const code = { app: appJs, linux: linuxJs, tts: ttsJs, 'chat-images': chatImagesJs, workspace: workspaceJs };
   for (const [name, source] of Object.entries(code)) {
     page = page.replace(
       new RegExp('<script src="/static/' + name + '\\.js[^"]*"></script>'),
@@ -376,6 +378,9 @@ const dom = new JSDOM(html, {
       if (path.startsWith('/api/search/health')) {
         return { ok: true, status: 200, async json() { return { ok: true, alive: ['searxng'], backends: [{ backend: 'searxng', ok: true, count: 2, ms: 12, error: null }] }; } };
       }
+      if (path === '/api/media/agent-image-models') return json({ models: [
+        { provider: 'fixture', model: 'art', name: 'Studio Art', can_edit: true, pricing_label: 'FREE' },
+      ] });
       if (path.startsWith('/api/media/jobs/')) {
         mock.jobPolls = (mock.jobPolls || 0) + 1;
         return json(mock.jobPolls < 2
@@ -391,6 +396,7 @@ const dom = new JSDOM(html, {
                       workspace: 'workspace', git: true, commands: ['ls', 'python3', 'git', 'nova'] });
       }
       if (path.startsWith('/api/terminal/run')) {
+        mock.terminalChat = JSON.parse(options.body || '{}').chat_id;
         const command = String(JSON.parse(options.body || '{}').command || '');
         if (command.startsWith('nova search')) {
           return json({ code: 0, stdout: '🔎 «' + command.slice(12) + '» — найдено 2 (0.2 c, searxng)\n'
@@ -470,8 +476,11 @@ const dom = new JSDOM(html, {
         mock.stopCurrentAgent?.();
         return json({ ok: true, stopping: true });
       }
+      if (path.startsWith('/api/agent/workspace/tree')) return json({ files: [] });
       if (path.startsWith('/api/agent/react')) {
-        mock.agentRequests.push(JSON.parse(options.body || '{}'));
+        const multipart = options.body instanceof window.FormData;
+        if (multipart) mock.editUpload = options.body.get('image');
+        mock.agentRequests.push(JSON.parse(multipart ? options.body.get('payload') : options.body));
         if (mock.agentStatus !== 200) {
           return { ok: false, status: mock.agentStatus, async json() { return { error: 'выключено' }; },
                    async text() { return '{"error":"выключено"}'; } };
@@ -1001,7 +1010,7 @@ check('настройки: кнопки темы нет, тема Aurora',
 console.log('\n8б) Раскрывающиеся разделы (единый компонент)');
 const accSections = [...sdoc.querySelectorAll('section.acc')];
 check('все разделы — аккордеоны, язык последним',
-  accSections.length === 7 && accSections[accSections.length - 1].dataset.accordion === 'language'
+  accSections.length === 8 && accSections[accSections.length - 1].dataset.accordion === 'language'
   && accSections[0].dataset.accordion === 'providers',
   accSections.map((a) => a.dataset.accordion).join(','));
 check('по умолчанию разделы свёрнуты',
@@ -1306,7 +1315,7 @@ press('?');
 await settle(60);
 check('старые хоткеи ничего не ломают', consoleErrors.length === 0, consoleErrors.join(' | '));
 check('кнопка автопоиска подписана и на телефоне',
-  document.getElementById('searchBtnText').textContent.startsWith('Поиск'));
+  document.getElementById('searchBtnText').textContent.startsWith('Инструменты'));
 check('серверная сессия восстановлена по нику', mock.sessionLogins.includes('Smoke'), JSON.stringify(mock.sessionLogins));
 
 // ══════════════════════════════════════════════════════════════
@@ -1326,7 +1335,7 @@ await window.sendMessage();
 await settle();
 check('обычное сообщение ушло в главный чат с Linux, без переключателя',
   mock.agentRequests.length === 1 && mock.agentRequests[0].message === 'привет'
-  && mock.agentRequests[0].search === false && mock.sendStreamCalls === sendCallsBefore,
+  && !('search' in mock.agentRequests[0]) && mock.sendStreamCalls === sendCallsBefore,
   JSON.stringify(mock.agentRequests));
 check('автопоиск выключен → серверу явно запрещены ВСЕ инструменты',
   mock.agentRequests[0].tools === false, JSON.stringify(mock.agentRequests[0]));
@@ -1334,6 +1343,7 @@ check('простой вопрос — сразу текст, без блока 
   lastAi().querySelector('.answer').textContent.includes('Чем помочь')
   && !lastAi().querySelector('.agent-term'));
 
+window.setWebSearch(true, true);
 mock.agentStream = AGENT_STREAM;
 document.getElementById('chat-input').value = 'запусти hello.py и расскажи, что вышло';
 await window.sendMessage();
@@ -1478,8 +1488,8 @@ document.getElementById('chat-input').value = 'сколько стоит ноу�
 await window.sendMessage();
 await settle();
 const searchTurn = lastAi();
-check('кнопка «Поиск» отправляет запрос в Linux-окружение',
-  mock.agentRequests[mock.agentRequests.length - 1].search === true
+check('разрешение инструментов не навязывает поиск',
+  !('search' in mock.agentRequests.at(-1))
   && mock.agentRequests[mock.agentRequests.length - 1].tools === true);
 check('поиск виден реальными Python gateway-командами',
   searchTurn.querySelector('.agent-term')?.textContent.includes('python3 -m novamind_cli call web_search') === true
@@ -1578,10 +1588,14 @@ check('за весь прогон ошибок в консоли нет', consol
 // ══════════════════════════════════════════════════════════════
 // 13) ИИ сам генерирует картинки, аудио и видео
 // ══════════════════════════════════════════════════════════════
-console.log('\n13) ИИ сам решает, что сгенерировать, и сам выбирает модель');
-check('в командной панели нет выбора медиа-модели и режима «изображение»',
-  (() => { window.openCmdk(); const text = document.getElementById('cmdk').textContent; window.closeCmdk();
-    return !text.includes('медиа-моделей') && !text.includes('Режим: изображение'); })());
+console.log('\n13) Медиа в чате: авто, выбор модели и редактирование');
+window.setWebSearch(true, true);
+document.getElementById('imageOptionsToggle').click();
+await settle();
+const picker = document.getElementById('chatImageModel');
+const pin = JSON.stringify({ provider: 'fixture', model: 'art' });
+check('модели загружаются прямо в чате, по умолчанию Авто',
+  !document.getElementById('chatImageOptions').hidden && picker.value === '' && picker.options.length === 2);
 check('приветствие говорит, что ИИ сам рисует, озвучивает и делает видео', (() => {
   const text = document.getElementById('welcomeScreen').textContent;
   return text.includes('нарисую') && text.includes('видео');
@@ -1593,7 +1607,7 @@ await window.sendMessage();
 await settle();
 const imageTurn = lastAi();
 check('просьба нарисовать ушла агенту как обычное сообщение',
-  mock.agentRequests[mock.agentRequests.length - 1].message === 'нарисуй лису в зимнем лесу');
+  mock.agentRequests.at(-1).message === 'нарисуй лису в зимнем лесу' && !mock.agentRequests.at(-1).image_model);
 check('картинка прямо в ответе ИИ', imageTurn.querySelector('.turn-media img')?.getAttribute('src') === '/media/fox.png');
 check('картинка стоит над текстом ответа', (() => {
   const box = imageTurn.querySelector('.turn-media');
@@ -1609,6 +1623,46 @@ check('текст ответа напечатан', imageTurn.querySelector('.an
 const savedChat = JSON.parse(window.localStorage.getItem('nova_history_v2'));
 const savedAi = savedChat.chats.find((c) => c.id === savedChat.activeId).messages.filter((m) => m.role === 'ai').pop();
 check('картинка сохранена в истории вместе с ответом', savedAi.meta?.media?.[0]?.url === '/media/fox.png');
+
+picker.value = pin;
+picker.dispatchEvent(new window.Event('change'));
+imageTurn.querySelector('[data-edit-image]').click();
+window.setWebSearch(false, true);
+const beforeEdit = mock.agentRequests.length;
+document.getElementById('chat-input').value = 'Сделай фон синим';
+await window.sendMessage();
+check('при отключённых инструментах исходник не отправляется, правка остаётся в поле',
+  mock.agentRequests.length === beforeEdit && document.getElementById('chat-input').value === 'Сделай фон синим');
+window.setWebSearch(true, true);
+await window.sendMessage();
+const editRequest = mock.agentRequests.at(-1);
+check('кнопка у изображения отправляет идентификатор исходника и точную модель',
+  editRequest.image_source === 'fox.png' && editRequest.image_model?.provider === 'fixture'
+  && editRequest.image_model?.model === 'art' && editRequest.chat_id === 'fixture-chat'
+  && editRequest.message.includes('Сделай фон синим') && window.localStorage.getItem('nova_chat_image_model') === pin);
+
+const clickInput = window.HTMLInputElement.prototype.click;
+window.HTMLInputElement.prototype.click = function () {
+  if (this.type !== 'file') return clickInput.call(this);
+  Object.defineProperty(this, 'files', { value: [new window.File(['bytes'], 'photo.png', { type: 'image/png' })] });
+  this.dispatchEvent(new window.Event('change'));
+};
+document.getElementById('editImageFile').click();
+window.HTMLInputElement.prototype.click = clickInput;
+await window.sendMessage('Убери тень');
+check('для загрузки используется multipart, без произвольных путей и URL',
+  mock.editUpload?.name === 'photo.png' && !mock.agentRequests.at(-1).image_source
+  && mock.agentRequests.at(-1).image_model?.model === 'art');
+picker.value = '';
+picker.dispatchEvent(new window.Event('change'));
+await window.toggleWorkspace(true);
+window.showWorkspaceTab('terminal');
+document.getElementById('workspaceCommand').value = 'ls -la';
+document.getElementById('workspaceTerminalForm').dispatchEvent(new window.Event('submit', { cancelable: true }));
+await settle();
+check('терминал показывает настоящий ответ API в контексте этого чата',
+  mock.terminalChat === 'fixture-chat' && document.getElementById('workspaceTerminalLog').textContent.includes('hello.py'));
+window.toggleWorkspace(false);
 
 mock.agentStream = AUDIO_STREAM;
 document.getElementById('chat-input').value = 'озвучь приветствие';
@@ -1632,7 +1686,7 @@ const activeId = JSON.parse(window.localStorage.getItem('nova_history_v2')).acti
 window.loadChat(activeId);
 await settle(60);
 check('после перезагрузки чата картинка на месте',
-  [...document.querySelectorAll('.turn-media img')].some((img) => img.getAttribute('src') === '/media/fox.png'));
+  document.querySelector('[data-edit-image="fox.png"]') && [...document.querySelectorAll('.turn-media img')].some((img) => img.getAttribute('src') === '/media/fox.png'));
 check('после перезагрузки видео на месте',
   [...document.querySelectorAll('video')].some((video) => video.getAttribute('src') === '/media/cat.mp4'));
 

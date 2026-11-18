@@ -66,7 +66,7 @@ PRESETS: dict[str, dict] = {
     },
     "llamacpp": {
         "name": "llama.cpp (llama-server)",
-        "base_url": "http://127.0.0.1:8080/v1",
+        "base_url": "http://127.0.0.1:9931",
         "ports": (8080, 8001),
         "catalog": ("/v1/models", "/props"),
         "hint": "Run `llama-server -m model.gguf --port 8080 -c 8192`.",
@@ -556,7 +556,7 @@ def capabilities_for(model: str, url: str | None = None) -> dict:
     return model_capabilities(model)
 
 
-def health(url: str | None = None, *, force: bool = False, timeout: float = 2.5) -> dict:
+def health(url: str | None = None, *, force: bool = False, timeout: float = 10) -> dict:
     """Is the local server alive and which models does it serve?"""
     base = normalize_base(url)
     started = time.time()

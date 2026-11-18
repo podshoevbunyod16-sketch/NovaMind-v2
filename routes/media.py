@@ -432,6 +432,14 @@ def media_models():
     })
 
 
+@media_bp.get('/api/media/agent-image-models')
+def agent_image_models():
+    """Only offer the same connected, price-policy-eligible models the agent can use."""
+    import media_agent
+    return jsonify({"models": [{**mg.selection_payload(m), "can_edit": mg.supports_image_edits(m)}
+                               for m in media_agent.candidates("image")]})
+
+
 @media_bp.route('/api/media/selection', methods=['GET'])
 def media_selection_get():
     return jsonify({"selection": config.media_selection or None})

@@ -1048,14 +1048,20 @@ def server_summaries(tools=None):
         else: result[sid]["connected"] = bool(server.get("connected"))
     return list(result.values())
 
-def tools_page(server_id="", offset=0, limit=20):
+def tools_page(server_id="", offset=0, limit=20, *, read_only=False):
     offset = max(0, int(offset or 0)); limit = min(50, max(1, int(limit or 20)))
     if not server_id:
-        servers = server_summaries()
+        if read_only:
+            visible = [t for t in connected_tools() if (t.get("annotations") or {}).get("readOnlyHint") is True]
+            servers = [s for s in server_summaries(visible) if s["tools"]]
+        else:
+            servers = server_summaries()
         end = offset + limit
         return {"count": len(servers), "offset": offset, "limit": limit,
                 "next_offset": end if end < len(servers) else None, "servers": servers[offset:end]}
     sid = resolve_server_id(server_id); tools = list_tools(sid); item = _connection(sid); end = offset + limit
+    if read_only:
+        tools = [t for t in tools if (t.get("annotations") or {}).get("readOnlyHint") is True]
     return {"server_id": sid, "server_name": item.get("name", sid), "count": len(tools), "offset": offset,
             "limit": limit, "next_offset": end if end < len(tools) else None,
             "tools": [{"name": t["name"], "description": str(t.get("description") or "")[:800],

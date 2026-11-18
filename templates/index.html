@@ -51,7 +51,7 @@
         <span class="nav-badge">Beta</span>
       </div>
 
-      <div class="nav-item" onclick="activateMode({prefix: '/image ', label: '🎨 Генерация изображений', placeholder: 'Опишите изображение для генерации...'}); closeSidebar();">
+      <div class="nav-item" onclick="ChatImages.start(); closeSidebar();">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
         Генерация изображений
       </div>
@@ -160,9 +160,9 @@
     <!-- Input Area -->
     <div class="input-area">
       <div class="input-toolbar">
-        <button class="toolbar-btn" id="btn-web-search" onclick="toggleWebSearch()" title="Автопоиск: ИИ сначала ищет в интернете и отвечает с источниками">
+        <button class="toolbar-btn" id="btn-web-search" onclick="toggleWebSearch()" title="Разрешить агенту выбирать инструменты для ответа">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
-          <span id="searchBtnText">Поиск</span>
+          <span id="searchBtnText">Инструменты</span>
           <span class="lg-dot" id="searchHealthDot" title="Состояние поисковых бэкендов"></span>
         </button>
 
@@ -170,6 +170,9 @@
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/><circle cx="12" cy="12" r="10"/></svg>
           <span id="reasoningBtnText">Рассуждение</span>
         </button>
+
+        <button type="button" class="toolbar-btn" id="imageOptionsToggle" aria-expanded="false"
+                aria-controls="chatImageOptions" title="Модель изображений и редактирование">🎨 <span>Изображения</span></button>
 
         <button class="toolbar-btn" id="btn-attach" onclick="toggleAttachMenu()">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
@@ -192,6 +195,14 @@
         <button class="toolbar-btn" id="btn-calm" onclick="toggleCalmMotion()" title="Отключить фоновые анимации">✨ <span>Анимации</span></button>
         <button class="toolbar-btn" type="button" onclick="toggleWorkspace(true)" title="Открыть файлы этой сессии">📁 <span>Файлы</span></button>
       </div>
+
+      <section id="chatImageOptions" class="chat-image-options" aria-label="Изображения" hidden>
+        <label for="chatImageModel">Модель изображений</label>
+        <select id="chatImageModel"><option value="">Авто</option></select>
+        <button type="button" class="toolbar-btn" id="editImageFile">✏️ Изменить файл…</button>
+        <small id="imageModelNote" role="status"></small>
+        <small>При правке исходник отправляется медиапровайдеру. В режиме «Авто» возможна смена провайдера.</small>
+      </section>
 
       <div class="mode-active" id="modeActiveBar" hidden>
         <span class="mode-active-dot"></span>
@@ -246,7 +257,15 @@
       <div><a id="workspaceZip" href="#" download>Скачать ZIP</a>
         <button type="button" onclick="toggleWorkspace(false)" aria-label="Закрыть">✕</button></div>
     </div>
-    <nav class="workspace-tabs"><button type="button" onclick="showWorkspaceTab('files')">Файлы</button><button type="button" onclick="showWorkspaceTab('diff')">GitHub · Diff</button></nav>
+    <nav class="workspace-tabs"><button type="button" onclick="showWorkspaceTab('files')">Файлы</button><button type="button" onclick="showWorkspaceTab('terminal')">Терминал</button><button type="button" onclick="showWorkspaceTab('diff')">GitHub · Diff</button></nav>
+    <section id="workspaceTabTerminal" hidden>
+      <form id="workspaceTerminalForm" class="workspace-github-form">
+        <label for="workspaceCommand">Команда в рабочей папке этого чата</label>
+        <input id="workspaceCommand" type="text" autocomplete="off" spellcheck="false" maxlength="2000" placeholder="ls -la" required>
+        <button type="submit">Выполнить</button>
+      </form>
+      <pre id="workspaceTerminalLog" class="agent-workspace-preview" role="log" aria-live="polite"></pre>
+    </section>
     <section id="workspaceTabFiles"><div id="workspaceFiles" class="agent-workspace-files">Откройте чат, чтобы посмотреть его файлы.</div>
       <pre id="workspacePreview" class="agent-workspace-preview" hidden></pre></section>
     <section id="workspaceTabDiff" hidden><form id="githubCloneForm" class="workspace-github-form">
@@ -299,11 +318,12 @@
   <!-- Куда складываются уведомления -->
   <div class="lg-toast-stack" id="toastStack"></div>
 
-  <script src="/static/i18n.js?v=lang4"></script>
+  <script src="/static/i18n.js?v=lang5"></script>
   <script src="/static/tts.js?v=speech2"></script>
-  <script src="/static/app.js?v=chatmem1"></script>
-  <script src="/static/linux.js?v=chatmem1"></script>
+  <script src="/static/app.js?v=react2"></script>
+  <script src="/static/linux.js?v=react2"></script>
+  <script src="/static/chat-images.js"></script>
   <script src="/static/memory.js"></script>
-  <script src="/static/workspace.js"></script>
+  <script src="/static/workspace.js?v=terminal2"></script>
 </body>
 </html>

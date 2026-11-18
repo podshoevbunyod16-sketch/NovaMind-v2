@@ -687,14 +687,14 @@ def run_command(command, timeout=None, cancel=None):
 
     cancelled = {"value": False}
     watcher = None
+    finished = threading.Event()
     if cancel is not None:
         def watch_cancel():
-            # Ждём флаг отмены и снимаем цепочку, не дожидаясь таймаута.
-            while not cancel.wait(0.2):
-                if not processes:
-                    continue
-            cancelled["value"] = True
-            kill_all()
+            while not finished.wait(0.05):
+                if cancel.is_set() and processes:
+                    cancelled["value"] = True
+                    kill_all()
+                    return
         watcher = threading.Thread(target=watch_cancel, daemon=True)
         watcher.start()
 
@@ -765,6 +765,7 @@ def run_command(command, timeout=None, cancel=None):
         finally:
             timer.cancel()
     finally:
+        finished.set()
         if watcher is not None:
             watcher.join(timeout=0.5)
         for handle in handles:
@@ -950,7 +951,26 @@ def terminal_run():
     if (blocked := guard()):
         return blocked
     data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict):
+        return jsonify({"error": "Ожидается объект запроса"}), 400
+    if "chat_id" not in data:  # Existing terminal clients use the owner's default directory.
+        return _terminal_run(data)
+    import database
+    from agent.workspace import bind_workspace, reset_workspace, workspace_root
+    chat_id = data["chat_id"]
+    if not isinstance(chat_id, str) or not chat_id or not database.chat_allowed(chat_id):
+        return jsonify({"error": "Сессия не найдена"}), 404
+    token = bind_workspace(workspace_root(identity.chat_owner(), chat_id))
+    try:
+        return _terminal_run(data)
+    finally:
+        reset_workspace(token)
+
+
+def _terminal_run(data):
     command = data.get("command", "")
+    if not isinstance(command, str):
+        return jsonify({"error": "Введите команду"}), 400
     if any(token in str(command) for token in ("&&", "||", "`", "$(", "${")):
         return jsonify({"error": "Составные конструкции &&/||/`/$( отключены", "command": command}), 400
     try:

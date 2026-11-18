@@ -49,6 +49,11 @@ def init_db():
                 created_at REAL NOT NULL,
                 FOREIGN KEY (chat_id) REFERENCES chats(id) ON DELETE CASCADE
             );
+            CREATE TABLE IF NOT EXISTS chat_images (
+                chat_id TEXT NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
+                filename TEXT NOT NULL,
+                PRIMARY KEY (chat_id, filename)
+            );
             CREATE INDEX IF NOT EXISTS idx_messages_chat ON messages(chat_id);
             CREATE INDEX IF NOT EXISTS idx_chats_updated ON chats(updated_at DESC);
         """)
@@ -129,12 +134,30 @@ def list_chats(limit=50, owner=None):
         rows = conn.execute(sql, args).fetchall()
     return [dict(r) for r in rows]
 
+def add_chat_image(chat_id, filename):
+    with _db_lock, get_db() as conn:
+        conn.execute("INSERT OR IGNORE INTO chat_images (chat_id,filename) VALUES (?,?)",
+                     (chat_id, filename))
+
+
+def has_chat_image(chat_id, filename):
+    with get_db() as conn:
+        return conn.execute("SELECT 1 FROM chat_images WHERE chat_id=? AND filename=?",
+                            (chat_id, filename)).fetchone() is not None
+
+
 def delete_chat(chat_id):
     """Удаляет чат, его сообщения и трассы шагов."""
     with _db_lock:
         with get_db() as conn:
             conn.execute("DELETE FROM messages WHERE chat_id=?", (chat_id,))
+            private_inputs = [row[0] for row in conn.execute(
+                "SELECT filename FROM chat_images WHERE chat_id=? AND filename LIKE 'edit_input_%'", (chat_id,))]
+            conn.execute("DELETE FROM chat_images WHERE chat_id=?", (chat_id,))
             conn.execute("DELETE FROM chats WHERE id=?", (chat_id,))
+    if private_inputs:
+        from agent.images import discard_uploads
+        discard_uploads(private_inputs)
     try:
         clear_traces(chat_id)          # таблицы может ещё не быть — не страшно
     except sqlite3.Error:
@@ -858,6 +881,15 @@ def create_agent_run(goal, chat_id="", run_id="", provider="", model="",
                  str(provider or ""), str(model or ""), time.time()),
             )
     return record_id
+
+
+def claim_agent_resume(record_id, previous_status, outcome=None):
+    """Consume a persisted pause/continuation once, even across Flask workers."""
+    with _db_lock, get_db() as conn:
+        updated = conn.execute("UPDATE agent_runs SET status='running', pending_question='', "
+                               "outcome=COALESCE(?,outcome), finished_at=NULL WHERE id=? AND status=?",
+                               (outcome, record_id, previous_status))
+        return updated.rowcount == 1
 
 
 def update_agent_run(record_id, **fields):
