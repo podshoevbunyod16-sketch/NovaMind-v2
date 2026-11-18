@@ -1,6 +1,7 @@
 """Durable HTTP endpoints for the first-party ReAct runner."""
 from __future__ import annotations
 
+import io
 import json
 import os
 import re
@@ -41,7 +42,8 @@ def _run(goal, record_id, *, chat_id="", history=None, observations=None,
          step_offset=0, resume=False, workspace=False,
          provider=None, model=None, run_id=None, approvals=None, tools_enabled=True,
          tool_names=None, cancel=None, rate_limit=None, rate_remaining=None, rate_scope="",
-         search_requested=False):
+         search_requested=False,
+         request_payload=None):
     tool_registry.bootstrap_default_tools()
     chosen_provider, chosen_model, _cfg = ai_providers.resolve_target(provider, model)
     configured_tokens = max(256, int(os.getenv("AGENT_MAX_TOKENS", "4096")))
@@ -293,6 +295,16 @@ def _run(goal, record_id, *, chat_id="", history=None, observations=None,
     flask_app = current_app._get_current_object()
     request_environ = dict(request.environ)
     request_environ.pop("werkzeug.request", None)
+    # Главный поток уже прочитал тело запроса (request.get_json()), поэтому в
+    # фоновый поток отдаём его сериализованную копию. Если переиспользовать
+    # environ как есть, любой request.get_json()/form/data в воркере ждёт
+    # CONTENT_LENGTH байтов из уже исчерпанного потока запроса и зависает
+    # навсегда — чат замирает после «найдено N сайтов» и не отвечает даже
+    # с выключенным автопоиском.
+    _body = request_payload if isinstance(request_payload, dict) else {}
+    _body_bytes = json.dumps(_body, ensure_ascii=False).encode("utf-8")
+    request_environ["wsgi.input"] = io.BytesIO(_body_bytes)
+    request_environ["CONTENT_LENGTH"] = str(len(_body_bytes))
     session_snapshot = dict(session)
     def worker_with_request_context():
         with flask_app.request_context(request_environ):
@@ -412,7 +424,7 @@ def start_react_run(payload=None):
                 history=prior, workspace=workspace, run_id=run_id,
                 tools_enabled=request_tools_allowed(payload), cancel=cancel,
                 rate_limit=limit, rate_remaining=remaining, rate_scope=scope,
-                search_requested=_search_flag(payload))
+                search_requested=_search_flag(payload), request_payload=payload)
 
 
 @react_bp.post("/api/agent/react/stop")
@@ -495,7 +507,8 @@ def answer_react_question():
                 workspace=bool(context.get("workspace")), provider=record.get("provider"),
                 model=record.get("model"), run_id=run_id, approvals=approvals,
                 tools_enabled=bool(context.get("tools_enabled", True)),
-                tool_names=context.get("tool_names"), cancel=cancel)
+                tool_names=context.get("tool_names"), cancel=cancel,
+                request_payload=payload)
 
 
 @react_bp.post("/api/agent/finish")
@@ -530,7 +543,8 @@ def finish_react_run():
                     workspace=bool(context.get("workspace")), provider=record.get("provider"),
                     model=record.get("model"), run_id=run_id,
                     tools_enabled=bool(context.get("tools_enabled", True)),
-                    tool_names=context.get("tool_names"), cancel=cancel)
+                    tool_names=context.get("tool_names"), cancel=cancel,
+                    request_payload=payload)
     database.update_agent_run(record["id"], outcome=outcome,
                               status="confirmed" if outcome == "confirmed" else "abandoned",
                               finished_at=time.time())
