@@ -43,12 +43,8 @@ def _run(goal, record_id, *, chat_id="", history=None, observations=None,
          step_offset=0, resume=False, workspace=False,
          provider=None, model=None, run_id=None, approvals=None, tools_enabled=True,
          tool_names=None, cancel=None, rate_limit=None, rate_remaining=None, rate_scope="",
-<<<<<<< HEAD
-         search_requested=False,
-         request_payload=None):
-=======
-         search_requested=False, image_model=None, image_source="", approved_call=None, action_limit=None):
->>>>>>> origin/arena/ef2fc404-novamind-v2
+           search_requested=False, image_model=None, image_source="", approved_call=None, action_limit=None,
+           request_payload=None):
     tool_registry.bootstrap_default_tools()
     chosen_provider, chosen_model, _cfg = ai_providers.resolve_target(provider, model)
     configured_tokens = max(256, int(os.getenv("AGENT_MAX_TOKENS", "4096")))
@@ -555,16 +551,11 @@ def answer_react_question():
                 step_offset=int(context.get("steps") or 0), resume=True,
                 workspace=bool(context.get("workspace")), provider=record.get("provider"),
                 model=record.get("model"), run_id=run_id, approvals=approvals,
-<<<<<<< HEAD
+                approved_call=approved_call, action_limit=context.get("action_limit"),
                 tools_enabled=bool(context.get("tools_enabled", True)),
                 tool_names=context.get("tool_names"), cancel=cancel,
+                image_model=context.get("image_model"), image_source=context.get("image_source", ""),
                 request_payload=payload)
-=======
-                approved_call=approved_call, action_limit=context.get("action_limit"),
-                tools_enabled=bool(context.get("tools_enabled", False)),
-                tool_names=context.get("tool_names"), cancel=cancel,
-                image_model=context.get("image_model"), image_source=context.get("image_source", ""))
->>>>>>> origin/arena/ef2fc404-novamind-v2
 
 
 @react_bp.post("/api/agent/finish")
@@ -602,15 +593,10 @@ def finish_react_run():
                     action_limit=int(context.get("steps") or 0) + max(1, int(os.getenv("AGENT_MAX_STEPS", "20"))),
                     workspace=bool(context.get("workspace")), provider=record.get("provider"),
                     model=record.get("model"), run_id=run_id,
-<<<<<<< HEAD
                     tools_enabled=bool(context.get("tools_enabled", True)),
                     tool_names=context.get("tool_names"), cancel=cancel,
+                    image_model=context.get("image_model"), image_source=context.get("image_source", ""),
                     request_payload=payload)
-=======
-                    tools_enabled=bool(context.get("tools_enabled", False)),
-                    tool_names=context.get("tool_names"), cancel=cancel,
-                    image_model=context.get("image_model"), image_source=context.get("image_source", ""))
->>>>>>> origin/arena/ef2fc404-novamind-v2
     database.update_agent_run(record["id"], outcome=outcome,
                               status="confirmed" if outcome == "confirmed" else "abandoned",
                               finished_at=time.time())
