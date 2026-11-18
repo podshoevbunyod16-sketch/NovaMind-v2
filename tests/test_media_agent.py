@@ -1,5 +1,5 @@
 """
-ИИ сам генерирует изображения, аудио и видео — без кнопок и ручного выбора модели.
+Генерация изображений, аудио и видео в ReAct-цикле.
 
 Проверяется:
   * выбор модели: только подключённые и бесплатные (или свой endpoint из .env),
@@ -151,14 +151,14 @@ def fake_media(monkeypatch):
 
 
 def test_ai_draws_picture_by_itself(google_client, monkeypatch, fake_media):
-    """«Нарисуй лису» — одна генерация и ни одного запроса к модели."""
+    """Модель выбирает image, видит файл и только затем отвечает."""
     seen = []
-    script(monkeypatch, ["этот ответ не должен понадобиться"], seen)
+    script(monkeypatch, ['```image\n{"prompt":"лису"}\n```', "Готово: рисунок в чате."], seen)
 
     events = ndjson(google_client.post("/api/agent/stream", json={"message": "нарисуй лису"}))
     assert len(fake_media) == 1 and fake_media[0]["kind"] == "image"
     assert fake_media[0]["prompt"] == "лису"  # в генератор передаётся само описание, без команды
-    assert seen == [], "явный медиа-запрос не зовёт модель"
+    assert len(seen) == 2 and "/media/image_1.png" in model_text(seen, 1)
     stage = next(event for event in events_of(events, "stage") if event["scene"] == "media")
     assert "медиа" in stage["title"].lower()
     media = events_of(events, "media")[0]["media"]
@@ -174,12 +174,14 @@ def test_ai_draws_picture_by_itself(google_client, monkeypatch, fake_media):
 
 def test_media_status_is_forwarded_as_steps(google_client, monkeypatch, fake_media):
     """Сообщения провайдера («пробую модель …») видны пользователю как шаги."""
+    script(monkeypatch, ['```image\n{"prompt":"маяк"}\n```', "Маяк готов."])
     events = ndjson(google_client.post("/api/agent/stream", json={"message": "нарисуй маяк"}))
     assert any("Пробую Pollinations Flux" in event["text"] for event in events_of(events, "step"))
 
 
 def test_media_works_without_linux(google_client, monkeypatch, fake_media):
     monkeypatch.setenv("TERMINAL_ENABLED", "0")
+    script(monkeypatch, ['```audio\n{"prompt":"Добро пожаловать!"}\n```', "Вот запись."])
     events = ndjson(google_client.post("/api/agent/stream", json={"message": "озвучь приветствие"}))
     assert fake_media[0]["kind"] == "audio"
     assert events_of(events, "media")
@@ -200,11 +202,12 @@ def test_terminal_off_is_reported_to_the_model(google_client, monkeypatch):
 def test_failed_generation_is_explained_to_model(google_client, monkeypatch):
     monkeypatch.setattr(media_agent, "generate",
                         lambda *a, **k: (None, None, ["Нет доступных моделей (видео). Подключить: VIDEO_API_URL"]))
-    script(monkeypatch, ["этот ответ не должен понадобиться"])
+    seen = []
+    script(monkeypatch, ['```video\n{"prompt":"волны"}\n```', "Не получилось создать видео."], seen)
     events = ndjson(google_client.post("/api/agent/stream", json={"message": "сделай видео волн"}))
     assert not events_of(events, "media")
     step = next(event for event in events_of(events, "step") if "Не получилось" in event["text"])
-    assert "VIDEO_API_URL" in step["text"]
+    assert "VIDEO_API_URL" in step["text"] and "VIDEO_API_URL" in model_text(seen, 1)
     assert "Не получилось создать видео" in answer_of(events)
 
 
@@ -214,6 +217,7 @@ def test_video_job_is_reported_as_queued(google_client, monkeypatch):
                  "model_name": "Veo 3.1", "provider_name": "Google AI Studio"},
                 {"name": "Veo 3.1", "provider_name": "Google AI Studio"}, [])
     monkeypatch.setattr(media_agent, "generate", queued)
+    script(monkeypatch, ['```video\n{"prompt":"кот"}\n```', "Видео в очереди провайдера."])
     events = ndjson(google_client.post("/api/agent/stream", json={"message": "сделай видео с котом"}))
     media = events_of(events, "media")[0]["media"]
     assert media["job_id"] == "job-7" and media["state"] == "queued"
@@ -231,9 +235,8 @@ def test_model_is_not_asked_to_list_media_models(google_client, monkeypatch):
 
 def test_generated_media_is_remembered_in_history(google_client, monkeypatch, fake_media):
     """После перезагрузки страницы медиа отрисуется из маркера в истории."""
-    script(monkeypatch, ["не нужен"])
-    ndjson(google_client.post("/api/agent/stream", json={"message": "нарисуй маяк"}).get_data()
-           if False else google_client.post("/api/agent/stream", json={"message": "нарисуй маяк"}))
+    script(monkeypatch, ['```image\n{"prompt":"маяк"}\n```', "Вот маяк."])
+    ndjson(google_client.post("/api/agent/stream", json={"message": "нарисуй маяк"}))
 
     seen = []
     script(monkeypatch, ["Сделаю ярче."], seen)

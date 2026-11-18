@@ -220,14 +220,18 @@ def native_tool_risk(name: str) -> str:
     return AGENT_ACTION_META.get(action, ("", "safe"))[1]
 
 
-def _schema_error(value: Any, schema: dict, path: str = "arguments") -> str | None:
+def validate_arguments(value: Any, schema: dict, path: str = "arguments") -> str | None:
     """Validate the JSON-Schema subset shared by model and direct tool calls."""
     if not isinstance(schema, dict):
         return None
     expected = schema.get("type")
     types = {"object": dict, "array": list, "string": str, "integer": int,
-             "number": (int, float), "boolean": bool}
-    if expected in types:
+             "number": (int, float), "boolean": bool, "null": type(None)}
+    if isinstance(expected, list):  # e.g. a nullable input from an MCP server
+        if not any(t in types and not validate_arguments(value, {"type": t}, path)
+                   for t in expected if isinstance(t, str)):
+            return f"{path}: expected one of {expected}"
+    elif isinstance(expected, str) and expected in types:
         valid = isinstance(value, types[expected])
         if expected in {"integer", "number"} and isinstance(value, bool):
             valid = False
@@ -246,12 +250,12 @@ def _schema_error(value: Any, schema: dict, path: str = "arguments") -> str | No
                 return f"{path}: unexpected fields {', '.join(sorted(extra))}"
         for key, item in value.items():
             if key in properties:
-                error = _schema_error(item, properties[key], f"{path}.{key}")
+                error = validate_arguments(item, properties[key], f"{path}.{key}")
                 if error:
                     return error
     if isinstance(value, list) and isinstance(schema.get("items"), dict):
         for index, item in enumerate(value):
-            error = _schema_error(item, schema["items"], f"{path}[{index}]")
+            error = validate_arguments(item, schema["items"], f"{path}[{index}]")
             if error:
                 return error
     return None
@@ -260,10 +264,11 @@ def _schema_error(value: Any, schema: dict, path: str = "arguments") -> str | No
 def call_tool(name: str, **kwargs) -> dict:
     """Единая точка исполнения инструмента реестра с guardrails и capability."""
     status_callback = kwargs.pop("_status_callback", None)
+    cancel = kwargs.pop("_cancel", None)
     spec = get_tool(name)
     if not spec:
         return {"ok": False, "error": {"type": "unknown_tool", "message": f"Unknown tool: {name}", "retryable": False}}
-    schema_error = _schema_error(kwargs, spec.schema or {})
+    schema_error = validate_arguments(kwargs, spec.schema or {})
     if schema_error:
         return {"ok": False, "tool": name,
                 "error": {"type": "bad_arguments", "retryable": False,
@@ -291,8 +296,10 @@ def call_tool(name: str, **kwargs) -> dict:
         return {"ok": False, "tool": name,
                 "error": {"type": "capability_unavailable", "retryable": True,
                           "message": "Проверка прав инструмента недоступна; вызов заблокирован."}}
-    if status_callback and name in {"image", "audio", "video"}:
+    if status_callback and name in {"image", "image_generate", "audio", "video"}:
         kwargs["on_status"] = status_callback
+    if cancel is not None and name in {"shell", "bash", "python"}:
+        kwargs["cancel"] = cancel
     return spec.call(**kwargs)
 
 def bootstrap_default_tools():
@@ -335,7 +342,7 @@ def bootstrap_default_tools():
         from routes.terminal import run_agent
         register_tool(ToolSpec(
             "shell", "Run a policy-checked command inside the workspace.",
-            {"type":"object","properties":{"command":{"type":"string"},"timeout":{"type":"number"}},"required":["command"]},
+            {"type":"object","properties":{"command":{"type":"string"},"timeout":{"type":"number"}},"required":["command"],"additionalProperties":False},
             lambda command, timeout=12, cancel=None: _workspace_guard() or _shell_result(
                 run_agent(command, timeout=min(float(timeout),120), cancel=cancel)),
             permissions=("workspace",), timeout=30, risk="write"))
@@ -596,8 +603,12 @@ def _register_agent_tools():
         def mcp_list(server_id="", offset=0, limit=20):
             import mcp_registry
             import mcp_manager
-            summaries = {s.get("server_id"): s for s in mcp_manager.server_summaries()}
-            result = mcp_registry.tools_page(str(server_id or ""), int(offset or 0), int(limit or 20))
+            import identity
+            read_only = not identity.is_admin_owner(identity.chat_owner())
+            if read_only and os.getenv("MCP_ALLOW_USER_READ", "0") != "1":
+                return {"ok": False, "error": {"type": "permission_denied", "message": "Нет доступа к MCP"}}
+            summaries = {} if read_only else {s.get("server_id"): s for s in mcp_manager.server_summaries()}
+            result = mcp_registry.tools_page(str(server_id or ""), int(offset or 0), int(limit or 20), read_only=read_only)
             if isinstance(result, dict):
                 sid = result.get("server_id") or str(server_id or "")
                 if sid in summaries:
@@ -620,10 +631,12 @@ def _register_agent_tools():
         if get_tool(name) is not None:
             continue
 
-        def media(kind=kind, prompt="", model="", size="", voice="", on_status=None):
+        def media(prompt="", model="", size="", voice="", source="", on_status=None, *, kind=kind):
             import media_agent
             action = {"prompt": str(prompt), "model": model, "size": size, "voice": voice}
             options = media_agent.build_options(kind, action)
+            if kind == "image" and source:
+                options["source"] = source
             result, used_model, errors = media_agent.generate(
                 kind, str(prompt), options=options, wanted_model=str(model or ""),
                 on_status=on_status)
@@ -634,11 +647,15 @@ def _register_agent_tools():
                                   "retryable": True}}
             return {"ok": True, "kind": kind, "model": used_model, "result": result}
         register_tool(ToolSpec(
-            name, f"Сгенерировать {title} по текстовому описанию.",
+            name, ("Generate an image, or edit an existing chat image with source and a change request."
+                   if kind == "image" else f"Сгенерировать {title} по текстовому описанию."),
             {"type": "object",
              "properties": {"prompt": {"type": "string"}, "model": {"type": "string"},
-                            "size": {"type": "string"}, "voice": {"type": "string"}},
-             "required": ["prompt"]},
+                            "size": {"type": "string"}, "voice": {"type": "string"},
+                            **({"source": {"type": "string", "description":
+                                "For editing: filename from an image result in this chat, never a URL or path."}}
+                               if kind == "image" else {})},
+             "required": ["prompt"], "additionalProperties": False},
             media, permissions=("network",), timeout=180, risk="write"))
 
     if get_tool("skill_create") is None:

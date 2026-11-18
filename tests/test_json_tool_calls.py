@@ -16,15 +16,16 @@ from guardrails import check_output
     ("mcp_call", {"server_id": "local", "tool": "read", "arguments": {}}),
 ])
 def test_fenced_json_uses_tool_and_arguments(name, arguments):
-    raw = "Перед вызовом.\n```json\n" + json.dumps(
+    raw = "```json\n" + json.dumps(
         {"tool": name, "arguments": arguments}, ensure_ascii=False) + "\n```"
     call, remainder = _extract_fenced(raw)
     assert call == {"tool": name, "arguments": arguments}
-    assert remainder == "Перед вызовом."
+    assert remainder == ""
 
 
 @pytest.mark.parametrize("raw", [
     'Example: {"tool":"shell","arguments":{"command":"ls"}}',
+    'Example:\n```json\n{"tool":"shell","arguments":{"command":"ls"}}\n```',
     '```json\n{"tool":"shell","arguments": {broken}}\n```',
     '```python\nprint(1)\n```',
 ])

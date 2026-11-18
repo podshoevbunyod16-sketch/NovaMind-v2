@@ -160,6 +160,7 @@ def _fake_generate(monkeypatch, result, errors=None, calls=None):
 
 
 def test_media_generation_reports_real_statuses(google_client, monkeypatch):
+    script(monkeypatch, ['```image\n{"prompt":"закат"}\n```', "Вот закат."])
     _fake_generate(monkeypatch, {"kind": "image", "url": "/media/x.png",
                                  "filename": "x.png", "model_name": "Pollinations Flux"})
     events = ndjson(google_client.post("/api/agent/stream", json={"message": "нарисуй закат"}))
@@ -171,6 +172,7 @@ def test_media_generation_reports_real_statuses(google_client, monkeypatch):
 
 
 def test_media_is_marked_in_history_for_reload(google_client, monkeypatch):
+    script(monkeypatch, ['```image\n{"prompt":"маяк"}\n```', "Вот маяк."])
     _fake_generate(monkeypatch, {"kind": "image", "url": "/media/x.png",
                                  "filename": "x.png", "model_name": "Pollinations Flux"})
     ndjson(google_client.post("/api/agent/stream", json={"message": "нарисуй маяк"}))
@@ -179,14 +181,14 @@ def test_media_is_marked_in_history_for_reload(google_client, monkeypatch):
     assert markers and "/media/x.png" in markers[0]["content"]
 
 
-def test_media_request_does_not_ask_the_model(client, sandbox, monkeypatch):
-    """Промпт уже в сообщении: модель для генерации не нужна (экономия запросов)."""
+def test_mention_of_media_request_does_not_bypass_model(client, sandbox, monkeypatch):
     calls, seen = [], []
     _fake_generate(monkeypatch, {"kind": "image", "url": "/media/y.png"}, calls=calls)
-    script(monkeypatch, ["этот ответ не должен использоваться"], seen)
-    events = ndjson(client.post("/api/agent/stream", json={"message": "нарисуй закат"}))
-    assert seen == [] and calls and calls[0] == "закат"
-    assert answer_of(events).startswith("Готово")
+    script(monkeypatch, ["Draw a sunset."], seen)
+    events = ndjson(client.post("/api/agent/react", json={
+        "message": "Переведи фразу «нарисуй закат»", "tools": True}))
+    assert len(seen) == 1 and calls == []
+    assert answer_of(events) == "Draw a sunset."
 
 
 # ══════════════ совместимость: /send_stream с agent=true ══════════════
@@ -293,6 +295,8 @@ def test_offline_intent_never_hijacks_a_working_model(client, sandbox, fake_sear
 # ══════════════ офлайн-медиа и служебные сообщения ══════════════
 
 def test_offline_media_request_says_why_and_tries_once(client, sandbox, monkeypatch):
+    import config
+    monkeypatch.setattr(config, "current_provider", "local_demo")
     attempts = []
     _fake_generate(monkeypatch, None,
                    errors=["Нет доступных моделей (image). Подключить: POLLINATIONS_API_KEY"],

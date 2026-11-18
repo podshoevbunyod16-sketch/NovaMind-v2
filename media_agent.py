@@ -1,7 +1,7 @@
 """
 media_agent.py — генерация изображений, аудио и видео по решению самого ИИ.
 
-Кнопок «Медиа» и ручного выбора модели в чате больше нет. Когда ИИ решает,
+В режиме «Авто» модель выбирает агент. Когда ИИ решает,
 что пользователю нужна картинка, озвучка или ролик, он вызывает действие
 image / audio / video, а этот модуль сам:
 
@@ -267,7 +267,25 @@ def generate(kind: str, prompt: str, options=None, wanted_model: str = "", on_st
         return None, None, [f"Неизвестный тип медиа: {kind}"]
     if not prompt:
         return None, None, ["Пустое описание: что именно создать?"]
+    from agent import images
+    turn = images.current()
+    options = dict(options or {})
     models = _prefer(candidates(kind), wanted_model)
+    if kind == "image":
+        if turn.model:
+            models = [m for m in models if (m["provider"], m["id"]) ==
+                      (turn.model["provider"], turn.model["model"])]
+            if not models:
+                return None, None, ["Выбранная модель изображений недоступна. Выберите другую модель или «Авто»."]
+        source = turn.source or options.get("source")
+        if source:
+            models = [m for m in models if mg.supports_image_edits(m)]
+            if not models:
+                return None, None, ["Нет доступной модели с редактированием. Выберите модель с поддержкой исходного изображения."]
+            try:
+                options["image_input"] = images.read_source(turn.chat_id, source)
+            except (ValueError, OSError) as exc:
+                return None, None, [str(exc)]
     if not models:
         return None, None, [f"Нет доступных моделей ({KIND_LABELS[kind]}). Подключить: {SETUP_HINTS[kind]}"]
 
@@ -282,6 +300,10 @@ def generate(kind: str, prompt: str, options=None, wanted_model: str = "", on_st
             confirm={"paid": True, "trial": True, "unknown": True},
         )
         if result:
+            if kind == "image" and turn.chat_id:
+                images.remember_generated(turn.chat_id, result)
+                if source:
+                    result["edited_from"] = source
             return result, model, errors
         errors.append(f"{model.get('name')}: {error}")
     return None, None, errors

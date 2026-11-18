@@ -400,6 +400,7 @@ def _openrouter_media_entries(live: dict) -> list:
             "media_type": media_type,
             "description": item.get("description") or "",
             "backend": "openrouter_image" if media_type == "image" else "openrouter_audio",
+            "image_input": "image" in (architecture.get("input_modalities") or []),
             "context_length": item.get("context_length") or 0,
         }
         entry.update(classify_openrouter_model(item))
@@ -1022,13 +1023,23 @@ def _google_generate_content(model_id: str, body: dict, timeout: int = 180):
         return None, "Google AI Studio вернул некорректный JSON"
 
 
+def supports_image_edits(model: dict) -> bool:
+    backend = model.get("backend")
+    return (backend == "google_image" or (backend == "openrouter_image" and bool(model.get("image_input")))
+            or (backend == "custom_image" and bool(os.getenv("IMAGE_EDIT_URL"))))
+
+
 def generate_google_image(model: dict, prompt: str, options=None, on_status=None):
     options = options or {}
     generation = {"responseModalities": ["IMAGE"]}
     size = options.get("image_size")
     if size:
         generation["imageConfig"] = {"imageSize": str(size).upper()}
-    body = {"contents": [{"role": "user", "parts": [{"text": prompt}]}], "generationConfig": generation}
+    parts = [{"text": prompt}]
+    if options.get("image_input"):
+        blob, mime = options["image_input"]
+        parts.append({"inlineData": {"mimeType": mime, "data": base64.b64encode(blob).decode("ascii")}})
+    body = {"contents": [{"role": "user", "parts": parts}], "generationConfig": generation}
     _report(on_status, f"Отправка запроса к Google AI Studio ({model['id']})")
     data, error = _google_generate_content(model["id"], body)
     if error:
@@ -1242,7 +1253,7 @@ def _openrouter_headers() -> dict:
     }
 
 
-def _openrouter_chat(model_id: str, prompt: str, modalities: list, on_status=None, timeout=240):
+def _openrouter_chat(model_id: str, prompt: str | list, modalities: list, on_status=None, timeout=240):
     headers = _openrouter_headers()
     if not headers:
         return None, "OpenRouter: OPENROUTER_API_KEY не найден в .env"
@@ -1268,7 +1279,12 @@ def _openrouter_chat(model_id: str, prompt: str, modalities: list, on_status=Non
 
 
 def generate_openrouter_image(model: dict, prompt: str, options=None, on_status=None):
-    data, error = _openrouter_chat(model["id"], prompt, ["image", "text"], on_status)
+    content = prompt
+    if (options or {}).get("image_input"):
+        blob, mime = options["image_input"]
+        url = f"data:{mime};base64," + base64.b64encode(blob).decode("ascii")
+        content = [{"type": "text", "text": prompt}, {"type": "image_url", "image_url": {"url": url}}]
+    data, error = _openrouter_chat(model["id"], content, ["image", "text"], on_status)
     if error:
         return None, error
     _report(on_status, "OpenRouter вернул ответ, сохраняю изображение")
@@ -1584,19 +1600,23 @@ def generate_custom_video(model: dict, prompt: str, options=None, on_status=None
 
 def generate_custom_image(model: dict, prompt: str, options=None, on_status=None):
     options = options or {}
-    endpoint = os.getenv("IMAGE_GENERATION_URL", "")
+    source = options.get("image_input")
+    endpoint = os.getenv("IMAGE_EDIT_URL" if source else "IMAGE_GENERATION_URL", "")
     if not endpoint:
-        return None, "IMAGE_GENERATION_URL не задан в .env"
+        return None, ("IMAGE_EDIT_URL" if source else "IMAGE_GENERATION_URL") + " не задан в .env"
     api_key = os.getenv("IMAGE_API_KEY", "") or os.getenv("OPENAI_API_KEY", "")
-    headers = {"Content-Type": "application/json"}
+    headers = {}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
-    _report(on_status, f"Отправка запроса к своему image-endpoint ({endpoint})")
+    _report(on_status, "Отправка запроса к своему image-endpoint")
     try:
-        resp = requests.post(endpoint, headers=headers, timeout=240, json={
-            "model": model["id"], "prompt": prompt,
-            "size": options.get("size") or "1024x1024", "n": 1,
-        })
+        fields = {"model": model["id"], "prompt": prompt, "size": options.get("size") or "1024x1024", "n": 1}
+        if source:
+            blob, mime = source
+            resp = requests.post(endpoint, headers=headers, timeout=240, data=fields,
+                                 files={"image": ("source" + _EXTENSION_BY_MIME[mime], blob, mime)})
+        else:
+            resp = requests.post(endpoint, headers=headers, timeout=240, json=fields)
     except requests.exceptions.Timeout:
         return None, "Свой image-endpoint: таймаут запроса"
     except requests.exceptions.RequestException as exc:
@@ -1841,6 +1861,12 @@ def generate_media(model: dict, prompt: str, options=None, on_status=None, confi
     error = validate_selection(model, confirm)
     if error:
         return None, error
+
+    if (options or {}).get("image_input"):
+        source = options["image_input"]
+        if not (supports_image_edits(model) and isinstance(source, tuple) and len(source) == 2
+                and isinstance(source[0], bytes) and source[1] in {"image/png", "image/jpeg", "image/webp"}):
+            return None, "Модель или исходное изображение не поддерживает редактирование."
 
     backend = BACKENDS.get(model.get("backend") or "")
     if backend is None:

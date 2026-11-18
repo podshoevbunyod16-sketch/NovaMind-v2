@@ -17,6 +17,7 @@ import database
 import identity
 import tool_registry
 from agent.loop import AgentContext, run_react
+from agent import images
 
 react_bp = Blueprint("react_agent", __name__)
 _ACTIVE_REACT: dict[str, threading.Event] = {}
@@ -41,7 +42,7 @@ def _run(goal, record_id, *, chat_id="", history=None, observations=None,
          step_offset=0, resume=False, workspace=False,
          provider=None, model=None, run_id=None, approvals=None, tools_enabled=True,
          tool_names=None, cancel=None, rate_limit=None, rate_remaining=None, rate_scope="",
-         search_requested=False):
+         search_requested=False, image_model=None, image_source="", approved_call=None, action_limit=None):
     tool_registry.bootstrap_default_tools()
     chosen_provider, chosen_model, _cfg = ai_providers.resolve_target(provider, model)
     configured_tokens = max(256, int(os.getenv("AGENT_MAX_TOKENS", "4096")))
@@ -69,10 +70,13 @@ def _run(goal, record_id, *, chat_id="", history=None, observations=None,
     integration_context = ""
     tool_catalog = []
     try:
-        if role == "admin" or str(os.getenv("MCP_ALLOW_USER_READ", "0")) == "1":
+        if any(spec.name == "mcp_call" for spec in specs) and (
+                role == "admin" or os.getenv("MCP_ALLOW_USER_READ", "0") == "1"):
             import mcp_manager
             connected = mcp_manager.discover_tools()
-            servers = mcp_manager.server_summaries()
+            if role != "admin":
+                connected = [item for item in connected if (item.get("annotations") or {}).get("readOnlyHint") is True]
+            servers = mcp_manager.server_summaries() if role == "admin" else []
             tool_catalog = [{"server_id": item.get("server_id"), "server_name": item.get("server_name"),
                              "name": item.get("name"), "description": item.get("description"),
                              "inputSchema": item.get("inputSchema"), "annotations": item.get("annotations")}
@@ -123,6 +127,7 @@ def _run(goal, record_id, *, chat_id="", history=None, observations=None,
     specs = [spec for spec in specs if capabilities.normalize_tool(spec.name) in capability.tools]
     events = queue.Queue()
     pending_events = []
+    deferred = []  # Interactive buttons must not arrive before their SQLite state exists.
     trace_events = []
     sources_found = False
     sources_results = []
@@ -203,7 +208,7 @@ def _run(goal, record_id, *, chat_id="", history=None, observations=None,
                 event.setdefault("trace_id", trace_id)
                 event.setdefault("role", role)
                 event.setdefault("prompt_versions", prompt_versions)
-                if chat_id and event.get("status") in {"completed", "paused"} and "usage" not in event:
+                if chat_id and event.get("status") in {"completed", "paused", "incomplete"} and "usage" not in event:
                     try:
                         import usage_stats
                         usage = usage_stats.record_turn(
@@ -228,17 +233,20 @@ def _run(goal, record_id, *, chat_id="", history=None, observations=None,
                 except Exception:
                     current_app.logger.warning("Не удалось сохранить маркер медиа ReAct-запуска",
                                                exc_info=True)
-        events.put(event)
+        if pending_events or event.get("type") == "completion":
+            deferred.append(event)
+        else:
+            events.put(event)
     context = AgentContext(
         goal=goal, complete=ai_providers.chat_completion, emit=emit,
         provider=chosen_provider, model=chosen_model, history=history or [],
         observations=observations or [], step_offset=int(step_offset or 0),
         workspace=bool(workspace), run_id=current_run_id, resume=resume,
-        cancel=cancel, approvals=list(approvals or []), tools=specs,
+        cancel=cancel, approvals=list(approvals or []), approved_call=approved_call, tools=specs,
         memory_context=memory_context, integration_context=integration_context,
         mcp_tools=tool_catalog, skill_context=skill_context,
-        search_requested=bool(search_requested),
-        max_steps=int(os.getenv("AGENT_MAX_STEPS", "20")),
+        search_requested=bool(search_requested), image_source=image_source,
+        max_steps=action_limit or max(1, int(os.getenv("AGENT_MAX_STEPS", "20"))),
         timeout=float(os.getenv("AGENT_TIMEOUT", "240")),
         max_tokens=max_tokens,
     )
@@ -253,7 +261,10 @@ def _run(goal, record_id, *, chat_id="", history=None, observations=None,
             if workspace:
                 from agent.workspace import bind_workspace, workspace_root
                 workspace_token = bind_workspace(workspace_root(owner, chat_id or current_run_id))
-            result = run_react(context)
+            with images.bind(images.ImageTurn(chat_id, image_model, image_source)):
+                result = run_react(context)
+            # A clarification/approval must not change the selected image backend or source.
+            result.context.update(image_model=image_model, image_source=image_source, action_limit=context.max_steps)
             final_status = result.status
             database.update_agent_run(
                 record_id, status=result.status, answer=result.answer,
@@ -263,6 +274,8 @@ def _run(goal, record_id, *, chat_id="", history=None, observations=None,
                 finished_at=time.time() if result.status != "paused" else None)
             if result.status != "paused" and chat_id and result.answer:
                 database.add_message(chat_id, "assistant", result.answer)
+            for event in deferred:
+                events.put(event)
         except Exception as error:  # preserve an answer and close the run on unexpected errors
             fallback = f"Агент завершился с внутренней ошибкой ({type(error).__name__}). Задача не подтверждена как выполненная."
             database.finish_agent_run(record_id, "provider_error", answer=fallback,
@@ -287,7 +300,8 @@ def _run(goal, record_id, *, chat_id="", history=None, observations=None,
                 reset_workspace(workspace_token)
             capabilities.deactivate(cap_token)
             with _ACTIVE_REACT_LOCK:
-                _ACTIVE_REACT.pop(current_run_id, None)
+                if _ACTIVE_REACT.get(current_run_id) is cancel:
+                    _ACTIVE_REACT.pop(current_run_id, None)
             events.put(None)
 
     flask_app = current_app._get_current_object()
@@ -331,11 +345,7 @@ def _run(goal, record_id, *, chat_id="", history=None, observations=None,
 
 
 def _search_flag(payload) -> bool:
-    """Кнопка «Автопоиск»: фронтенд шлёт ``search``, старые клиенты — ``auto_search``.
-
-    Раньше читался только ``auto_search``, поэтому принудительный веб-поиск
-    не запускался никогда, и модель отвечала «из памяти».
-    """
+    """Explicit web research preference. The chat's tool opt-in is independent."""
     from agent.runtime import parse_bool
     if not isinstance(payload, dict):
         return False
@@ -350,7 +360,22 @@ def start_react_run(payload=None):
     from agent.runtime import is_enabled
     if not is_enabled():
         return jsonify({"ok": False, "error": "ИИ-агент отключён настройкой AGENT_ENABLED=0"}), 403
-    payload = payload if isinstance(payload, dict) else (request.get_json(silent=True) or {})
+    upload = None
+    if not isinstance(payload, dict):
+        if request.mimetype == "multipart/form-data":
+            if request.content_length is None or request.content_length > images.MAX_IMAGE_BYTES + 65536:
+                return jsonify({"error": "Максимальный размер изображения — 8 МБ."}), 413
+            try:
+                payload = json.loads(request.form.get("payload", ""))
+            except ValueError:
+                return jsonify({"error": "Некорректные параметры запроса"}), 400
+            upload = request.files.get("image")
+            if upload is None:
+                return jsonify({"error": "Исходное изображение не приложено"}), 400
+        else:
+            payload = request.get_json(silent=True) or {}
+    if not isinstance(payload, dict):
+        return jsonify({"error": "Ожидается объект запроса"}), 400
     import guardrails
     input_verdict = guardrails.check_input(str(payload.get("message") or ""))
     if not input_verdict.allowed:
@@ -385,6 +410,20 @@ def start_react_run(payload=None):
                             "scope": scope})
         response.headers["Retry-After"] = str(retry_after)
         return response, 429
+    tools_enabled = request_tools_allowed(payload)
+    image_source = payload.get("image_source", "")
+    if not tools_enabled and (image_source or upload is not None):
+        return jsonify({"error": "Для редактирования включите инструменты."}), 400
+    try:
+        image_model = images.model_selection(payload.get("image_model"))
+        if image_source != "":
+            images.check_source(chat_id, image_source)
+        if upload is not None:
+            if image_source:
+                raise ValueError("Выберите одно исходное изображение.")
+            image_source = images.store_upload(chat_id, upload.stream)
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
     try:
         session_history_limit = max(20, min(1000, int(os.getenv("AGENT_SESSION_HISTORY_LIMIT", "200"))))
     except (TypeError, ValueError):
@@ -393,8 +432,8 @@ def start_react_run(payload=None):
     # The chat_id is the session boundary: no messages from other chats/users
     # are mixed into this agent context.
     prior = database.get_chat_history(chat_id, limit=session_history_limit)
-    database.add_message(chat_id, "user", goal)
-    workspace = (parse_bool(payload.get("workspace"), default=False)
+    database.add_message(chat_id, "user", goal + (f"\n📎 {image_source}" if image_source else ""))
+    workspace = (tools_enabled and parse_bool(payload.get("workspace"), default=False)
                  and str(os.getenv("TERMINAL_ENABLED", "0")) == "1"
                  and can_use_workspace())
     run_id = str(uuid.uuid4())
@@ -410,7 +449,8 @@ def start_react_run(payload=None):
         return jsonify({"ok": False, "error": "Не удалось сохранить запуск"}), 500
     return _run(goal, record_id, chat_id=chat_id,
                 history=prior, workspace=workspace, run_id=run_id,
-                tools_enabled=request_tools_allowed(payload), cancel=cancel,
+                tools_enabled=tools_enabled, cancel=cancel,
+                image_model=image_model, image_source=image_source,
                 rate_limit=limit, rate_remaining=remaining, rate_scope=scope,
                 search_requested=_search_flag(payload))
 
@@ -442,16 +482,21 @@ def answer_react_question():
     try:
         context = json.loads(record.get("context") or "{}")
     except (ValueError, TypeError):
-        context = {}
+        return jsonify({"error": "Контекст запуска повреждён. Начните новый запрос."}), 409
     try:
         pending = json.loads(record.get("pending_question") or "")
     except (ValueError, TypeError):
-        pending = {}
-    if isinstance(pending, dict) and pending.get("type") == "confirmation":
+        return jsonify({"error": "Данные подтверждения недоступны. Начните новый запрос."}), 409
+    if not isinstance(context, dict) or not isinstance(pending, dict) or pending.get("type") not in {"ask_user", "confirmation"}:
+        return jsonify({"error": "Контекст запуска недоступен. Начните новый запрос."}), 409
+    if pending.get("type") == "confirmation":
         if not isinstance(payload.get("approved"), bool):
             return jsonify({"ok": False, "error": "Укажите approved: true или false"}), 400
     elif not answer:
         return jsonify({"ok": False, "error": "Введите ответ"}), 400
+    if not database.claim_agent_resume(record["id"], "paused"):
+        return jsonify({"error": "Ответ уже принят"}), 409
+    approved_call = None
     messages = list(context.get("messages") or [])
     approvals = list(context.get("approvals") or [])
     if isinstance(pending, dict) and pending.get("type") == "confirmation":
@@ -475,10 +520,10 @@ def answer_react_question():
                 sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
         if approval_key:
             approvals.append(approval_key)
+        approved_call = {"tool": tool_name, "arguments": pending.get("arguments") or {}}
         messages.append({"role": "user", "content": f"The user approved the action {tool_name}. Run it and verify the result."})
     else:
         messages.append({"role": "user", "content": "The user answered the clarifying question: " + answer[:4000]})
-    database.update_agent_run(record["id"], status="running", pending_question="")
     chat_id = record.get("chat_id") or ""
     if chat_id:
         database.add_message(chat_id, "user", ("Разрешение на действие: " + str(pending.get("tool") or ""))
@@ -494,8 +539,10 @@ def answer_react_question():
                 step_offset=int(context.get("steps") or 0), resume=True,
                 workspace=bool(context.get("workspace")), provider=record.get("provider"),
                 model=record.get("model"), run_id=run_id, approvals=approvals,
-                tools_enabled=bool(context.get("tools_enabled", True)),
-                tool_names=context.get("tool_names"), cancel=cancel)
+                approved_call=approved_call, action_limit=context.get("action_limit"),
+                tools_enabled=bool(context.get("tools_enabled", False)),
+                tool_names=context.get("tool_names"), cancel=cancel,
+                image_model=context.get("image_model"), image_source=context.get("image_source", ""))
 
 
 @react_bp.post("/api/agent/finish")
@@ -515,10 +562,13 @@ def finish_react_run():
         try:
             context = json.loads(record.get("context") or "{}")
         except (ValueError, TypeError):
-            context = {}
+            return jsonify({"error": "Контекст запуска повреждён. Начните новый запрос."}), 409
+        if not isinstance(context, dict) or not context.get("goal"):
+            return jsonify({"error": "Контекст запуска недоступен. Начните новый запрос."}), 409
         history = list(context.get("messages") or [])
         history.append({"role": "user", "content": "Continue working on the original goal. Use the observations and do not repeat actions that were already completed."})
-        database.update_agent_run(record["id"], status="running", outcome=outcome)
+        if not database.claim_agent_resume(record["id"], record["status"], outcome=outcome):
+            return jsonify({"error": "Запуск уже продолжен"}), 409
         run_id = str(record.get("run_id") or record["id"])
         cancel = threading.Event()
         with _ACTIVE_REACT_LOCK:
@@ -527,10 +577,12 @@ def finish_react_run():
                     chat_id=record.get("chat_id") or "", history=history,
                     observations=context.get("observations") or [],
                     step_offset=int(context.get("steps") or 0), resume=True,
+                    action_limit=int(context.get("steps") or 0) + max(1, int(os.getenv("AGENT_MAX_STEPS", "20"))),
                     workspace=bool(context.get("workspace")), provider=record.get("provider"),
                     model=record.get("model"), run_id=run_id,
-                    tools_enabled=bool(context.get("tools_enabled", True)),
-                    tool_names=context.get("tool_names"), cancel=cancel)
+                    tools_enabled=bool(context.get("tools_enabled", False)),
+                    tool_names=context.get("tool_names"), cancel=cancel,
+                    image_model=context.get("image_model"), image_source=context.get("image_source", ""))
     database.update_agent_run(record["id"], outcome=outcome,
                               status="confirmed" if outcome == "confirmed" else "abandoned",
                               finished_at=time.time())

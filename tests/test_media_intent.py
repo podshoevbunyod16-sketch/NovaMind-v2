@@ -75,7 +75,7 @@ def test_code_inside_fence_does_not_trigger_drawing():
         assert agent_routes.requested_media_kind(f"запусти код: {call}") is None, call
 
 
-def test_media_request_does_not_run_the_code_agent(admin_client, sandbox, monkeypatch):
+def test_app_creation_is_not_an_image_and_requires_real_work(admin_client, sandbox, monkeypatch):
     """«Создай приложение с анимацией» — шаги агента, а не картинка."""
     from tests.agent_helpers import events_of, ndjson, script
 
@@ -84,4 +84,5 @@ def test_media_request_does_not_run_the_code_agent(admin_client, sandbox, monkey
         "/api/agent/stream", json={"message": "Создай приложение с красивой анимации"}))
     assert events_of(events, "media") == []
     assert events_of(events, "stage")[0]["scene"] != "media"
-    assert "приложение создано" in str(events_of(events, "result")[0]["reply"])
+    result = events_of(events, "result")[0]
+    assert result["status"] == "incomplete" and "приложение создано" not in result["reply"]

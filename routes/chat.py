@@ -73,6 +73,7 @@ def media_result_marker(result: dict, model: dict) -> str:
         "url": result.get("url"),
         "filename": result.get("filename"),
         "mime": result.get("mime"),
+        "editable": result.get("editable") is True,
         "title": result.get("model_name") or result.get("model"),
         "provider": result.get("provider_name") or result.get("provider"),
         "pricing_status": result.get("pricing_status"),

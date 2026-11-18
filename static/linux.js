@@ -87,28 +87,14 @@
     return state.ready;
   }
 
-  function isCodingRequest(message) {
-    const text = String(message || '');
-    const mentionsProjectFile = /(?:[\w.-]+\/)*[\w.-]+\.(?:py|js|ts|css|html|json|md|yml|yaml|toml)\b/i.test(text);
-    const asksForCodeWork = /(найди|исправ|ошиб|баг|проверь|анализ|объясни|рефактор|тест|почему|не работает|предложи|fix|debug|review|refactor|test)/i.test(text);
-    return mentionsProjectFile && asksForCodeWork;
-  }
-
   async function runTurn(message, options = {}) {
     if (state.ready) await state.ready.catch(() => null);
     if (!isAvailable()) return false;
 
-    // options.tools — кнопка «Автопоиск». false => вообще без инструментов:
-    // ни кодинг-агента, ни поиска, ни терминала — только прямой запрос к модели.
+    // Permission to use tools does not mean "search before every answer".
     const tools = options.tools !== false;
-    const search = !!options.search && tools;
-    const coding = tools && isCodingRequest(message);
     const turn = createAssistantTurn();
-    if (coding) turn.beginIdle('Исследую исходный код…');
-    // Не показываем «Поищу в интернете» заранее: флаг поиска только
-    // разрешает поиск, а решение должен принять агент. Сцену search
-    // сервер отправит после фактического выбора action=search.
-    else turn.beginIdle(options.reasoning ? 'Рассуждаю…' : 'Думаю…');
+    turn.beginIdle(options.reasoning ? 'Рассуждаю…' : 'Думаю…');
 
     const controller = new AbortController();
     activeAbort = controller;
@@ -121,16 +107,24 @@
     const chatRef = (typeof window.serverChatRequest === 'function')
       ? window.serverChatRequest() : {};
     try {
+      const payload = { message, tools, workspace: tools, reasoning: !!options.reasoning, ...chatRef };
+      if (tools && options.imageModel) payload.image_model = options.imageModel;
+      if (tools && options.imageSource) payload.image_source = options.imageSource;
+      let body = JSON.stringify(payload);
+      const headers = { 'Content-Type': 'application/json' };
+      if (tools && options.imageFile) {
+        body = new FormData();
+        body.append('payload', JSON.stringify(payload));
+        body.append('image', options.imageFile);
+        delete headers['Content-Type']; // The browser supplies the multipart boundary.
+      }
       const response = await fetch(endpoint, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message, search, tools, workspace: tools, reasoning: !!options.reasoning,
-                               ...chatRef }),
+        method: 'POST', headers, body,
         signal: controller.signal,
       });
       state.runId = response.headers?.get?.('X-Agent-Run-Id') || '';
       if (!response.ok) {
-        if ((response.status === 403 || response.status === 404) && !coding) {
+        if (response.status === 403 && !options.imageSource && !options.imageFile) {
           turn.remove();
           activeAbort = null;
           state.status = { ...(state.status || {}), available: false, tools: false };
@@ -197,7 +191,7 @@
         steps: result.steps,
         stopped: !!result.stopped,
         runId: completionRunId,
-        linux: coding ? false : (result.linux === undefined ? (result.steps > 0 || result.searched) : !!result.linux),
+        linux: !!result.linux,
       });
     } catch (error) {
       activeAbort = null;

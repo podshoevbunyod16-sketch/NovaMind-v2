@@ -4,6 +4,9 @@
   const preview = document.getElementById('workspacePreview');
   const zip = document.getElementById('workspaceZip');
   let selectedChat = '';
+  let openVersion = 0;
+  const terminalForm = document.getElementById('workspaceTerminalForm');
+  const terminalLog = document.getElementById('workspaceTerminalLog');
   const query = () => `?chat_id=${encodeURIComponent(selectedChat)}`;
   const status = (message) => {
     const node = document.getElementById('workspaceGitStatus');
@@ -14,6 +17,7 @@
       const store = typeof historyLoad === 'function' ? historyLoad() : null;
       const chat = store?.chats?.find((item) => item.id === store.activeId);
       if (chat?.serverId) return chat.serverId;
+      if (store?.resetServer || chat) return '';  // An unbound new chat must not reuse the previous session.
       const response = await fetch('/api/history');
       const data = await response.json();
       return data.chat_id || '';
@@ -22,8 +26,16 @@
   window.toggleWorkspace = async (open) => {
     panel?.classList.toggle('open', Boolean(open));
     panel?.setAttribute('aria-hidden', String(!open));
+    const version = ++openVersion;
+    selectedChat = '';
+    terminalLog.textContent = '';
+    preview.hidden = true;
+    zip.removeAttribute('href');
     if (!open) return;
-    selectedChat = await getChatId();
+    window.showWorkspaceTab('files');
+    const chatId = await getChatId();
+    if (version !== openVersion) return;
+    selectedChat = chatId;
     if (!selectedChat) { list.textContent = 'Создайте или откройте чат.'; return; }
     const query = `?chat_id=${encodeURIComponent(selectedChat)}`;
     zip.href = `/api/agent/workspace/zip${query}`;
@@ -31,6 +43,7 @@
     try {
       const response = await fetch(`/api/agent/workspace/tree${query}`);
       const data = await response.json();
+      if (version !== openVersion) return;
       if (!response.ok) throw new Error(data.error || 'Не удалось загрузить файлы');
       list.replaceChildren();
       if (!data.files?.length) { list.textContent = 'В папке пока нет файлов.'; return; }
@@ -55,8 +68,35 @@
     const diff = document.getElementById('workspaceTabDiff');
     if (files) files.hidden = tab !== 'files';
     if (diff) diff.hidden = tab !== 'diff';
+    document.getElementById('workspaceTabTerminal').hidden = tab !== 'terminal';
+    if (tab === 'terminal') {
+      const available = selectedChat && window.Linux?.hasLinux();
+      terminalForm.querySelectorAll('input, button').forEach((el) => { el.disabled = !available; });
+      if (!available) terminalLog.textContent = selectedChat
+        ? 'Терминал недоступен. Проверьте вход и TERMINAL_ENABLED.' : 'Сначала откройте чат.';
+    }
     if (tab === 'diff') window.refreshWorkspaceDiff();
   };
+  terminalForm.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const version = openVersion;
+    const command = document.getElementById('workspaceCommand').value.trim();
+    if (!selectedChat || !command || !window.Linux?.hasLinux() || terminalForm.dataset.busy) return;
+    terminalForm.dataset.busy = '1';
+    terminalLog.textContent += `$ ${command}\n`;
+    try {
+      const response = await fetch('/api/terminal/run', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ command, chat_id: selectedChat }) });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+      if (version === openVersion) terminalLog.textContent += [data.stdout, data.stderr, `Код: ${data.code}\n`].filter(Boolean).join('\n');
+    } catch (error) {
+      if (version === openVersion) terminalLog.textContent += `${error.message}\n`;
+    } finally {
+      delete terminalForm.dataset.busy;
+      terminalLog.textContent = terminalLog.textContent.slice(-30000);
+    }
+  });
   window.refreshWorkspaceDiff = async () => {
     if (!selectedChat) selectedChat = await getChatId();
     try {

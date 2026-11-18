@@ -323,6 +323,9 @@ def test_tools_are_dropped_when_the_local_server_rejects_them(monkeypatch):
     assert text == "ok"
     assert len(calls) == 2
     assert "tools" in calls[0] and "tools" not in calls[1]
+    fallback = next(m for m in calls[1]["messages"] if 'Available tool schemas' in m["content"])
+    assert fallback['role'] == 'user' and '"name":"web_search"' in fallback['content']
+    assert '"name":"shell"' not in fallback['content']
     assert meta["native_tools"] is False
     assert "tools" in meta["capabilities"]["degraded"]
 

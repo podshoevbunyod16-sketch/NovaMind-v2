@@ -481,9 +481,8 @@ def test_react_stops_repeated_mcp_failures_and_requests_final_answer(monkeypatch
 
     assert len(tool_definitions) == 4
     assert all(definitions for definitions in tool_definitions[:3])
-    # The identical retry is permitted after an MCP failure, but the model may
-    # choose to stop once the repeated observation confirms no recovery.
-    assert tool_definitions[3]
+    # Three consecutive failures close the tool budget, including read-only MCP.
+    assert tool_definitions[3] is None
     assert len(calls) == 3
     assert len(result.observations) == 3
     assert all(item["result"]["ok"] is False for item in result.observations)
@@ -509,3 +508,18 @@ def test_mcp_connection_store_reads_legacy_root_file(tmp_path, monkeypatch):
     monkeypatch.setattr(mcp, "LEGACY_STORE", legacy)
     monkeypatch.setattr(mcp, "STORE", tmp_path / "new-location.json")
     assert mcp._read()["existing"]["name"] == "existing server"
+
+
+def test_readonly_user_sees_only_permitted_schemas_even_after_listing(google_client, tmp_path, monkeypatch):
+    from tests.agent_helpers import script, ndjson, events_of, model_text
+    store_server(monkeypatch, tmp_path)
+    monkeypatch.setenv('MCP_ALLOW_USER_READ', '1')
+    mcp._TOOL_CACHE['server'] = (time.monotonic() + 60, [
+        {'name': 'lookup_record', 'annotations': {'readOnlyHint': True}, 'description': 'lookup'},
+        {'name': 'private_write', 'annotations': {'readOnlyHint': False}, 'description': 'write'}])
+    seen = []
+    script(monkeypatch, ['{"tool":"mcp_list","arguments":{"server_id":"server"}}', 'Есть поиск.'], seen)
+    events = ndjson(google_client.post('/api/agent/react', json={'message': 'Какие инструменты доступны?', 'tools': True}))
+    assert events_of(events, 'tool')[0]['status'] == 'ok'
+    assert 'lookup_record' in str(seen[0]['tools']) and 'lookup_record' in model_text(seen, 1)
+    assert 'private_write' not in str(seen)
