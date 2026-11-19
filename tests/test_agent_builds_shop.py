@@ -28,6 +28,7 @@ def pipeline(tmp_path, monkeypatch):
     work.mkdir()
     monkeypatch.setenv("TERMINAL_DIR", str(work))
     monkeypatch.setenv("TERMINAL_ENABLED", "1")
+    monkeypatch.setenv("TERMINAL_HOST_EXECUTION", "1")
     from tool_registry import bootstrap_default_tools
     bootstrap_default_tools()
     return work

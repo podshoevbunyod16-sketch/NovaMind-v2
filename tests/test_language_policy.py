@@ -92,15 +92,27 @@ def test_current_language_from_request_header_and_body(client, monkeypatch):
 
 def test_language_endpoint_stores_answer_language(client, monkeypatch, tmp_path):
     monkeypatch.setattr(config, "RUNTIME_SETTINGS_FILE", str(tmp_path / "runtime.json"))
+    default_language = config.ui_language
     response = client.post("/api/settings/lang", json={"language": "en"})
     data = response.get_json()
     assert response.status_code == 200
     assert data["language"] == "en" and data["answer_language"] == "English"
-    # Сессия запоминает язык: у разных посетителей он может быть разным.
+    # A visitor setting must not rewrite the process-wide server default.
+    assert config.ui_language == default_language
     with client.session_transaction() as stored:
         assert stored.get("ui_language") == "en"
     listing = client.get("/api/settings/lang").get_json()
+    assert listing["language"] == "en"
     assert any(item["code"] == "ru" for item in listing["answer_languages"])
+
+
+def test_language_selection_is_isolated_between_browser_sessions(client):
+    other = client.application.test_client()
+    other.get("/api/csrf-token")
+    assert client.post("/api/settings/lang", json={"language": "en"}).status_code == 200
+    assert other.post("/api/settings/lang", json={"language": "ru"}).status_code == 200
+    assert client.get("/api/settings/lang").get_json()["language"] == "en"
+    assert other.get("/api/settings/lang").get_json()["language"] == "ru"
 
 
 def test_language_endpoint_rejects_unknown_ui_language(client):

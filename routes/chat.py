@@ -317,7 +317,7 @@ def send_stream():
         )
 
     # Единый слой провайдеров: Groq / Gemini / OpenRouter / локальный llama-server /
-    # встроенная офлайн-модель. Потоком идут и токены ответа, и ход рассуждений.
+    # встроенная офлайн-модель. В поток попадают только токены ответа.
     provider, model, provider_cfg = resolve_target()
     history_for_prompt = [m for m in _history_stream if m.get("content")]
 
@@ -327,7 +327,6 @@ def send_stream():
     @stream_with_context
     def generate():
         full_reply = ""
-        reasoning_text = ""
         stream_error = ""
         try:
             if tools_allowed:
@@ -351,8 +350,7 @@ def send_stream():
                     del contents[:-20]
                 yield emit({"done": True, "model": model, "provider": provider,
                             "offline": provider == "local_demo", "has_reply": True,
-                            "mcp": True, "reasoning_chars": 0,
-                            "chat_id": _chat_id_stream})
+                            "mcp": True, "chat_id": _chat_id_stream})
                 return
 
             for kind, chunk in chat_stream(
@@ -365,10 +363,7 @@ def send_stream():
                 timeout=120,
                 reasoning=bool(reasoning),
             ):
-                if kind == "reasoning":
-                    reasoning_text += chunk
-                    yield emit({"reasoning": chunk})
-                elif kind == "token":
+                if kind == "token":
                     full_reply += chunk
                     yield emit({"token": chunk})
                 elif kind == "error":
@@ -396,7 +391,7 @@ def send_stream():
                         yield emit({"error": str(retry_meta or "Выбранная модель не вернула ответ.")})
                     yield emit({"done": True, "model": model, "provider": provider,
                                 "offline": provider == "local_demo", "has_reply": False,
-                                "reasoning_chars": len(reasoning_text), "chat_id": _chat_id_stream})
+                                "chat_id": _chat_id_stream})
                     return
 
             if full_reply:
@@ -412,7 +407,6 @@ def send_stream():
                 "provider": provider,
                 "offline": provider == "local_demo",
                 "has_reply": bool(full_reply),
-                "reasoning_chars": len(reasoning_text),
                 "chat_id": _chat_id_stream,
             })
         except GeneratorExit:

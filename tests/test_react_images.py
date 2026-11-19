@@ -60,6 +60,10 @@ def test_pinned_generate_and_edit_are_real_chat_artifacts(client, monkeypatch, p
     new = events_of(edited, 'media')[0]['media']
     assert new['url'] != original['url'] and new['edited_from'] == original['filename']
     assert client.get(new['url']).data == png('red') and client.get(original['url']).data == png('blue')
+    assert client.get(original['url']).data == png('blue')  # durable ownership survives re-reads
+    from app import app
+    other_browser = app.test_client()
+    assert other_browser.get(original['url']).status_code == 404
     assert [model for model, parts in provider] == ['editor', 'editor']  # ignores model's other preference
     inline = provider[1][1][1]['inlineData']
     assert inline['mimeType'] == 'image/png' and base64.b64decode(inline['data']) == png('blue')

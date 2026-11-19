@@ -5,6 +5,7 @@
 не больше 1200 символов, гостям память недоступна.
 """
 import json
+import os
 
 import pytest
 
@@ -58,17 +59,29 @@ def test_memory_kind_is_validated():
 
 
 def test_secret_filter_blocks_passwords_and_tokens():
+    github_token = "ghp_" + "abcdefghijklmnopqrstuvwxyz012345"
+    openai_token = "sk-" + "abcdefghijklmnopqrstuv"
     assert memory.is_secret("пароль: qwerty123") is True
     assert memory.is_secret("Мой API key = abcdef123456") is True
-    assert memory.is_secret("токен ghp_abcdefghijklmnopqrstuvwxyz012345") is True
-    assert memory.is_secret("sk-abcdefghijklmnopqrstuv") is True
+    assert memory.is_secret(f"токен {github_token}") is True
+    assert memory.is_secret(openai_token) is True
     assert memory.is_secret("Люблю кофе без сахара") is False
 
     with pytest.raises(ValueError):
         memory.remember("u1", "мой пароль: qwerty123")
     with pytest.raises(ValueError):
-        memory.remember("u1", "ключ sk-abcdefghijklmnopqrstuv")
+        memory.remember("u1", f"ключ {openai_token}")
     assert memory.recall("u1", "пароль") == []
+
+
+def test_provider_environment_is_empty_before_application_use():
+    """Provider keys cannot leak from the developer environment into tests."""
+    provider_vars = (
+        "GEMINI_API_KEY", "GOOGLE_AI_STUDIO_KEY", "OPENROUTER_API_KEY", "GROQ_API_KEY",
+        "CEREBRAS_API_KEY", "OPENAI_API_KEY", "IMAGE_API_KEY", "AUDIO_API_KEY",
+        "VIDEO_API_KEY", "POLLINATIONS_TOKEN",
+    )
+    assert all(not os.environ.get(name) for name in provider_vars)
 
 
 def test_memory_requires_user_key():

@@ -65,6 +65,8 @@ POLLINATIONS_BASE_URL = (os.getenv("POLLINATIONS_BASE_URL") or "https://gen.poll
 GROQ_TTS_URL = "https://api.groq.com/openai/v1/audio/speech"
 #: Orpheus принимает максимум 200 символов за запрос (документация Groq).
 GROQ_TTS_MAX_INPUT = 200
+TTS_MAX_INPUT_CHARS = 12000
+TTS_MAX_CHUNKS = 64
 #: Условия модели Groq нужно принять один раз в консоли — иначе 400 model_terms_required.
 GROQ_TERMS_URL = "https://console.groq.com/playground?model={model}"
 #: Ключ Pollinations (без него /v1/audio/speech отвечает 401).
@@ -263,6 +265,9 @@ _MEDIA_LOCK = threading.Lock()
 # ---------- Асинхронные задачи (видео) ----------
 _JOBS: dict = {}
 _JOBS_LOCK = threading.Lock()
+_JOB_POLL_LOCKS: dict[str, threading.Lock] = {}
+JOB_TTL_SECONDS = 24 * 60 * 60
+MAX_MEDIA_JOBS = 256
 
 
 # ======================================================================
@@ -878,7 +883,6 @@ def resolve_selection(requested_provider=None, requested_model=None, confirm=Non
     Клиент может прислать provider/model явно либо опустить их — тогда берётся
     модель, выбранная в панели «Медиа». Возвращает (model, confirm, error).
     """
-    import config
     confirm = dict(confirm or {})
     selection = current_selection()
     provider = (requested_provider or selection.get("provider") or "").strip()
@@ -951,6 +955,38 @@ def save_media(kind: str, data: bytes, mime: str = "", prefix: str = "") -> dict
         "size": len(data),
         "url": f"/media/{filename}",
     }
+
+
+def discard_media_file(media: dict) -> bool:
+    """Remove an output created by this module without following paths outside MEDIA_DIR."""
+    if not isinstance(media, dict):
+        return False
+    filename = str(media.get("filename") or "")
+    if not filename or os.path.basename(filename) != filename:
+        return False
+    url = media.get("url")
+    if isinstance(url, str) and url:
+        from urllib.parse import urlsplit
+        parsed_url = urlsplit(url)
+        if parsed_url.scheme or parsed_url.netloc or not parsed_url.path.startswith("/media/"):
+            return False
+        if os.path.basename(parsed_url.path) != filename:
+            return False
+    media_dir = os.path.realpath(MEDIA_DIR)
+    candidate = str(media.get("path") or os.path.join(media_dir, filename))
+    path = os.path.realpath(candidate)
+    try:
+        if os.path.commonpath((media_dir, path)) != media_dir or os.path.basename(path) != filename:
+            return False
+    except ValueError:
+        return False
+    try:
+        os.remove(path)
+        return True
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
 
 
 def _decode_data_url(value: str):
@@ -1076,7 +1112,8 @@ def generate_google_audio(model: dict, prompt: str, options=None, on_status=None
     if blob[:4] != b"RIFF" and ("l16" in mime_low or "pcm" in mime_low or not mime_low):
         # Gemini отдаёт сырой PCM 16 бит, моно. Браузер такой не проиграет,
         # поэтому оборачиваем его в WAV-заголовок.
-        import io, wave
+        import io
+        import wave
         found = re.search(r"rate=(\d+)", mime_low)
         rate = int(found.group(1)) if found else 24000
         buf = io.BytesIO()
@@ -1190,6 +1227,8 @@ def generate_groq_audio(model: dict, prompt: str, options=None, on_status=None):
     первый же запрос длиннее 200 символов, хотя интерфейс обещал озвучку.
     """
     options = {**(model.get("options") or {}), **(options or {})}
+    if len(prompt) > TTS_MAX_INPUT_CHARS:
+        return None, f"Groq: текст превышает лимит {TTS_MAX_INPUT_CHARS} символов."
     from groq_rotation import get_groq_key
     key = get_groq_key()
     if not key:
@@ -1203,6 +1242,8 @@ def generate_groq_audio(model: dict, prompt: str, options=None, on_status=None):
     parts = _split_for_limit(prompt, limit)
     if not parts:
         return None, "Groq: пустой текст для озвучки."
+    if len(parts) > TTS_MAX_CHUNKS:
+        return None, f"Groq: текст разбивается более чем на {TTS_MAX_CHUNKS} частей."
 
     blobs = []
     for index, part in enumerate(parts):
@@ -1683,18 +1724,40 @@ BACKENDS = {
 # Задачи (для асинхронного видео)
 # ======================================================================
 def register_job(job: dict) -> str:
+    now = time.time()
     job_id = job.get("job_id") or uuid.uuid4().hex
     record = dict(job)
     record.update({
         "job_id": job_id,
         "state": job.get("state") or "queued",
-        "created_at": time.time(),
-        "updated_at": time.time(),
+        "created_at": now,
+        "updated_at": now,
         "polls": 0,
+        "owner_registered": False,
         "events": [{"at": time.time(), "status": f"Задача принята провайдером: {job_id}"}],
     })
+    try:
+        import identity
+        record["owner"] = identity.chat_owner()
+    except Exception:  # noqa: BLE001 - unknown owner must fail closed
+        record["owner"] = ""
     with _JOBS_LOCK:
+        for key, value in list(_JOBS.items()):
+            stamp = float(value.get("updated_at") or value.get("created_at") or now)
+            if now - stamp > JOB_TTL_SECONDS:
+                poll_lock = _JOB_POLL_LOCKS.get(key)
+                if poll_lock and poll_lock.locked():
+                    continue
+                _JOBS.pop(key, None)
+                _JOB_POLL_LOCKS.pop(key, None)
+        if len(_JOBS) >= MAX_MEDIA_JOBS:
+            return ""
+        if job_id in _JOBS:
+            job_id = uuid.uuid4().hex
+            record["job_id"] = job_id
+            record["events"][0]["status"] = f"Задача принята провайдером: {job_id}"
         _JOBS[job_id] = record
+        _JOB_POLL_LOCKS[job_id] = threading.Lock()
     return job_id
 
 
@@ -1704,11 +1767,50 @@ def _append_event(record: dict, status: str):
     record["updated_at"] = time.time()
 
 
+def _snapshot_job(record: dict) -> dict:
+    snapshot = dict(record)
+    if isinstance(record.get("events"), list):
+        snapshot["events"] = [dict(event) if isinstance(event, dict) else event
+                               for event in record["events"]]
+    if isinstance(record.get("media"), dict):
+        snapshot["media"] = dict(record["media"])
+    return snapshot
+
+
+def _store_job(job_id: str, record: dict) -> bool:
+    """Store a poll transition under the registry lock; do not resurrect purged jobs."""
+    with _JOBS_LOCK:
+        if job_id not in _JOBS:
+            return False
+        _JOBS[job_id] = _snapshot_job(record)
+        return True
+
+
 def poll_job(job_id: str) -> dict | None:
+    """Poll one job at a time; concurrent callers receive the current snapshot."""
+    with _JOBS_LOCK:
+        if job_id not in _JOBS:
+            return None
+        poll_lock = _JOB_POLL_LOCKS.setdefault(job_id, threading.Lock())
+        if not poll_lock.acquire(blocking=False):
+            return _snapshot_job(_JOBS[job_id])
+    try:
+        return _poll_job_once(job_id)
+    finally:
+        poll_lock.release()
+
+
+def _poll_job_once(job_id: str) -> dict | None:
     """Опрашивает провайдера и возвращает реальный статус задачи."""
     with _JOBS_LOCK:
-        record = dict(_JOBS.get(job_id) or {})
+        record = _snapshot_job(_JOBS.get(job_id) or {})
     if not record:
+        return None
+    stamp = float(record.get("updated_at") or record.get("created_at") or time.time())
+    if time.time() - stamp > JOB_TTL_SECONDS:
+        with _JOBS_LOCK:
+            _JOBS.pop(job_id, None)
+            _JOB_POLL_LOCKS.pop(job_id, None)
         return None
     if record.get("state") in {"succeeded", "failed", "cancelled"}:
         return record
@@ -1727,30 +1829,30 @@ def poll_job(job_id: str) -> dict | None:
         except (requests.exceptions.Timeout, requests.exceptions.RequestException) as exc:
             _append_event(record, f"Опрос задачи: {exc}")
             record["state"] = record.get("state") or "queued"
-            _JOBS[job_id] = record
+            _store_job(job_id, record)
             return record
         if resp.status_code >= 400:
             _append_event(record, _provider_error(resp))
             record["state"] = "failed"
             record["error"] = _provider_error(resp)
-            _JOBS[job_id] = record
+            _store_job(job_id, record)
             return record
         try:
             data = resp.json()
         except ValueError:
             _append_event(record, "Опрос задачи: провайдер вернул некорректный JSON")
-            _JOBS[job_id] = record
+            _store_job(job_id, record)
             return record
         if data.get("error"):
             record["state"] = "failed"
             record["error"] = json.dumps(data["error"], ensure_ascii=False)[:800]
             _append_event(record, f"Провайдер сообщил об ошибке: {record['error']}")
-            _JOBS[job_id] = record
+            _store_job(job_id, record)
             return record
         if not data.get("done"):
             record["state"] = "running"
             _append_event(record, "Провайдер выполняет задачу (done=false)")
-            _JOBS[job_id] = record
+            _store_job(job_id, record)
             return record
         # Готово: ищем файл в response.
         response = data.get("response") or {}
@@ -1763,7 +1865,7 @@ def poll_job(job_id: str) -> dict | None:
             record["state"] = "failed"
             record["error"] = "Провайдер завершил задачу, но не вернул файл видео."
             _append_event(record, record["error"])
-            _JOBS[job_id] = record
+            _store_job(job_id, record)
             return record
         try:
             download = requests.get(
@@ -1775,13 +1877,13 @@ def poll_job(job_id: str) -> dict | None:
             record["state"] = "failed"
             record["error"] = f"Не удалось скачать видео провайдера: {exc}"
             _append_event(record, record["error"])
-            _JOBS[job_id] = record
+            _store_job(job_id, record)
             return record
         saved = save_media("video", download.content,
                            download.headers.get("Content-Type", "video/mp4"), prefix="veo")
         record.update({"state": "succeeded", "media": saved})
         _append_event(record, "Видео получено от провайдера и сохранено")
-        _JOBS[job_id] = record
+        _store_job(job_id, record)
         return record
 
     # Прочие провайдеры: опрашиваем status_url, если он есть.
@@ -1809,25 +1911,59 @@ def poll_job(job_id: str) -> dict | None:
         except (requests.exceptions.Timeout, requests.exceptions.RequestException, ValueError) as exc:
             _append_event(record, f"Опрос задачи: {exc}")
         _append_event(record, f"Статус провайдера: {record.get('state')}")
-        with _JOBS_LOCK:
-            _JOBS[job_id] = record
+        _store_job(job_id, record)
         return record
 
     record["state"] = record.get("state") or "queued"
     _append_event(record, "У задачи нет status_url — статус уточнить нельзя")
-    with _JOBS_LOCK:
-        _JOBS[job_id] = record
+    _store_job(job_id, record)
     return record
 
 
 def get_job(job_id: str) -> dict | None:
     with _JOBS_LOCK:
         record = _JOBS.get(job_id)
-    return dict(record) if record else None
+        return _snapshot_job(record) if record else None
+
+
+def mark_job_owner_registered(job_id: str) -> bool:
+    with _JOBS_LOCK:
+        record = _JOBS.get(job_id)
+        if not record:
+            return False
+        record["owner_registered"] = True
+        record["updated_at"] = time.time()
+        return True
+
+
+def fail_job(job_id: str, error: str, *, discard_output=False) -> bool:
+    output = None
+    with _JOBS_LOCK:
+        current = _JOBS.get(job_id)
+        if not current:
+            return False
+        record = _snapshot_job(current)
+        output = record.get("media")
+        record["state"] = "failed"
+        record["error"] = str(error or "Задача не выполнена")[:800]
+        if discard_output:
+            record["media"] = None
+        _append_event(record, record["error"])
+        _JOBS[job_id] = record
+    if discard_output and output:
+        discard_media_file(output)
+    return True
 
 
 def job_public(record: dict) -> dict:
     """Поля задачи, которые можно отдавать в браузер."""
+    media = record.get("media")
+    if isinstance(media, dict):
+        media = dict(media)
+        if isinstance(media.get("url"), str):
+            from urllib.parse import urlsplit, urlunsplit
+            parsed = urlsplit(media["url"])
+            media["url"] = urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", ""))
     return {
         "job_id": record.get("job_id"),
         "state": record.get("state"),
@@ -1837,7 +1973,7 @@ def job_public(record: dict) -> dict:
         "created_at": record.get("created_at"),
         "updated_at": record.get("updated_at"),
         "error": record.get("error"),
-        "media": record.get("media"),
+        "media": media,
         "events": record.get("events") or [],
     }
 
@@ -1855,6 +1991,8 @@ def generate_media(model: dict, prompt: str, options=None, on_status=None, confi
     prompt = (prompt or "").strip()
     if not prompt:
         return None, "Пустой промпт: опишите, что нужно создать."
+    if isinstance(model, dict) and model.get("media_type") == "audio" and len(prompt) > TTS_MAX_INPUT_CHARS:
+        return None, f"TTS: текст превышает лимит {TTS_MAX_INPUT_CHARS} символов."
     if not isinstance(model, dict) or not model.get("id"):
         return None, "Медиа-модель не выбрана."
 
@@ -1896,6 +2034,8 @@ def generate_media(model: dict, prompt: str, options=None, on_status=None, confi
     })
     if result.get("job_id"):
         job_id = register_job(result)
+        if not job_id:
+            return None, "Слишком много активных media jobs; повторите позже."
         result["job_id"] = job_id
         result["state"] = result.get("state") or "queued"
     return result, None

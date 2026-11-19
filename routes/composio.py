@@ -4,8 +4,76 @@ routes/composio.py — Интеграция с Composio (внешние серв
 from flask import Blueprint, request, jsonify, render_template, session
 import requests
 import os
+import secrets
+import time
+import hmac
+import json
+import re
+import threading
 
 composio_bp = Blueprint("composio", __name__)
+
+# Flask's default session cookie is signed but client-side, so it cannot hold
+# one-shot authorization state: an old cookie could replay a consumed token.
+_COMPOSIO_SESSION_BINDING_KEY = "composio_session_binding"
+_COMPOSIO_CONFIRMATION_TTL_SECONDS = 300
+_COMPOSIO_MAX_PENDING = 128
+_COMPOSIO_PENDING = {}
+_COMPOSIO_PENDING_LOCK = threading.Lock()
+
+
+def _session_binding():
+    binding = session.get(_COMPOSIO_SESSION_BINDING_KEY)
+    if not isinstance(binding, str) or len(binding) < 32:
+        binding = secrets.token_urlsafe(32)
+        session[_COMPOSIO_SESSION_BINDING_KEY] = binding
+    return binding
+
+
+def _prune_pending(now):
+    for challenge_id, pending in list(_COMPOSIO_PENDING.items()):
+        try:
+            expired = now - float(pending.get("created_at", 0)) > _COMPOSIO_CONFIRMATION_TTL_SECONDS
+        except (TypeError, ValueError):
+            expired = True
+        if expired:
+            _COMPOSIO_PENDING.pop(challenge_id, None)
+
+
+def _create_pending(action, params, connected_account_id, binding):
+    now = time.time()
+    with _COMPOSIO_PENDING_LOCK:
+        _prune_pending(now)
+        if len(_COMPOSIO_PENDING) >= _COMPOSIO_MAX_PENDING:
+            return None
+        challenge_id = secrets.token_urlsafe(32)
+        _COMPOSIO_PENDING[challenge_id] = {
+            "session_binding": binding,
+            "action": action,
+            "params": params,
+            "connected_account_id": connected_account_id,
+            "created_at": now,
+        }
+        return challenge_id
+
+
+def _consume_pending(challenge_id, binding):
+    now = time.time()
+    with _COMPOSIO_PENDING_LOCK:
+        pending = _COMPOSIO_PENDING.get(challenge_id)
+        if not isinstance(pending, dict):
+            return None
+        try:
+            expired = now - float(pending.get("created_at", 0)) > _COMPOSIO_CONFIRMATION_TTL_SECONDS
+        except (TypeError, ValueError):
+            expired = True
+        if expired:
+            _COMPOSIO_PENDING.pop(challenge_id, None)
+            return None
+        expected = pending.get("session_binding", "")
+        if not isinstance(binding, str) or not hmac.compare_digest(expected, binding):
+            return None
+        return _COMPOSIO_PENDING.pop(challenge_id)
 
 
 @composio_bp.before_request
@@ -93,22 +161,71 @@ def composio_execute():
     api_key = os.getenv('COMPOSIO_API_KEY', '')
     if not api_key:
         return jsonify({'error': 'Composio не подключен'}), 400
-    data = request.get_json() or {}
+    data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict):
+        return jsonify({'error': 'Ожидается объект запроса'}), 400
     action_name = data.get('action', '')
     params = data.get('params', {})
     connected_account_id = data.get('connected_account_id', '')
-    if not action_name:
-        return jsonify({'error': 'Укажи действие'}), 400
+    if not isinstance(action_name, str) or not re.fullmatch(r'[A-Za-z0-9_.:-]{1,160}', action_name):
+        return jsonify({'error': 'Некорректное имя действия'}), 400
+    if not isinstance(params, dict):
+        return jsonify({'error': 'Параметры действия должны быть объектом'}), 400
+    if not isinstance(connected_account_id, str) or len(connected_account_id) > 200:
+        return jsonify({'error': 'Некорректный connected_account_id'}), 400
+    if len(json.dumps(params, ensure_ascii=False, separators=(',', ':')).encode('utf-8')) > 65536:
+        return jsonify({'error': 'Параметры действия слишком велики'}), 413
+
+    # Store the exact operation in process-side state. The signed browser cookie
+    # carries only an unpredictable binding, never the payload or one-shot token.
+    challenge_id = _create_pending(
+        action_name, params, connected_account_id, _session_binding()
+    )
+    if challenge_id is None:
+        return jsonify({'error': 'Слишком много ожидающих подтверждений'}), 503
+    return jsonify({
+        'confirmation_required': True,
+        'challenge_id': challenge_id,
+        'action': action_name,
+        'params': params,
+        'expires_in': _COMPOSIO_CONFIRMATION_TTL_SECONDS,
+    }), 409
+
+
+@composio_bp.route('/api/composio/confirm', methods=['POST'])
+def composio_confirm():
+    """Execute exactly one previously displayed Composio challenge.
+
+    Confirmation is intentionally not accepted together with action/params:
+    those values must come from an atomic server-side pending operation bound
+    to the current authenticated session. Consuming before provider execution
+    prevents replay, including replay with an older signed cookie.
+    """
+    api_key = os.getenv('COMPOSIO_API_KEY', '')
+    if not api_key:
+        return jsonify({'error': 'Composio не подключен'}), 400
+    data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict):
+        data = {}
+    challenge_id = data.get('challenge_id')
+    if not isinstance(challenge_id, str) or not challenge_id or data.get('confirmed') is not True:
+        return jsonify({'error': 'Требуется явное подтверждение ожидающей операции'}), 400
+    pending = _consume_pending(challenge_id, session.get(_COMPOSIO_SESSION_BINDING_KEY))
+    if pending is None:
+        return jsonify({'error': 'Challenge не найден, истёк или уже использован'}), 409
     try:
         headers = {'x-api-key': api_key, 'Content-Type': 'application/json'}
-        payload = {"input": params, "allow_tracing": True}
-        if connected_account_id:
-            payload["connected_account_id"] = connected_account_id
-        resp = requests.post(f'https://backend.composio.dev/api/v2/actions/{action_name}/execute', json=payload, headers=headers, timeout=30)
+        payload = {"input": pending['params'], "allow_tracing": True}
+        if pending.get('connected_account_id'):
+            payload['connected_account_id'] = pending['connected_account_id']
+        resp = requests.post(
+            f"https://backend.composio.dev/api/v2/actions/{pending['action']}/execute",
+            json=payload, headers=headers, timeout=30,
+        )
         resp.raise_for_status()
         return jsonify({'result': resp.json()})
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
+    except Exception:
+        return jsonify({'error': 'Не удалось выполнить подтверждённое действие'}), 502
 
 @composio_bp.route('/api/composio/actions', methods=['GET'])
 def composio_actions():

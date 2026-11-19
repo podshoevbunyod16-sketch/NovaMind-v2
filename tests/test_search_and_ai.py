@@ -167,6 +167,14 @@ def upstream():
 @pytest.fixture
 def mock_search(monkeypatch, upstream):
     """Поиск идёт только в локальный mock: searxng → wiki."""
+    from urllib.parse import urlparse
+    allowed = urlparse(upstream)
+    validate = search_routes._validate_public_http_url
+    monkeypatch.setattr(search_routes, "_validate_public_http_url", lambda url: (
+        urlparse(str(url)).scheme == allowed.scheme
+        and urlparse(str(url)).hostname == allowed.hostname
+        and urlparse(str(url)).port == allowed.port
+    ) or validate(url))
     monkeypatch.setattr(search_routes, "SEARXNG_INSTANCES", [upstream])
     monkeypatch.setenv("SEARCH_BACKENDS", "searxng,wiki")
     monkeypatch.setattr(search_routes, "READER_TIMEOUT", 2.0)
@@ -258,7 +266,7 @@ def test_local_model_catalog_is_discovered(local_runtime):
     assert [m["id"] for m in models] == ["mock-local-7b"]
 
 
-def test_reasoning_prepass_streams_before_answer(local_runtime):
+def test_reasoning_prepass_is_hidden_before_answer(local_runtime):
     kinds = []
     reasoning = []
     answer = []
@@ -268,9 +276,10 @@ def test_reasoning_prepass_streams_before_answer(local_runtime):
             reasoning.append(chunk)
         elif kind == "token":
             answer.append(chunk)
-    assert "".join(reasoning).startswith("Plan:")
+    assert reasoning == []
+    assert "reasoning" not in kinds
     assert "Локальный ответ" in "".join(answer)
-    assert kinds.index("reasoning") < kinds.index("token")
+    assert "Plan:" not in "".join(answer)
     assert kinds[-1] == "done"
 
 

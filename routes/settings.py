@@ -1,12 +1,24 @@
 """
 routes/settings.py — Настройки провайдеров и моделей
 """
-from flask import Blueprint, request, jsonify, render_template, session
 import zipfile
-from ai_providers import fetch_available_models, provider_status, PROVIDER_LABELS, MODEL_ERRORS, media_models_catalog
-from config import PROVIDERS, save_selected_model, current_provider, current_model, GOOGLE_CLIENT_ID
+
+from flask import Blueprint, jsonify, render_template, request, session
+
 import mcp_registry
 import skills_registry
+from ai_providers import (
+    MODEL_ERRORS,
+    PROVIDER_LABELS,
+    fetch_available_models,
+    media_models_catalog,
+    provider_status,
+)
+from config import (
+    GOOGLE_CLIENT_ID,
+    PROVIDERS,
+    save_selected_model,
+)
 
 settings_bp = Blueprint("settings", __name__)
 
@@ -267,7 +279,8 @@ SUPPORTED_LANGUAGES = language_policy.UI_LANGUAGES
 @settings_bp.route('/api/settings/lang')
 def get_ui_language():
     import config
-    return jsonify({"language": config.ui_language,
+    language = language_policy.normalize(session.get("ui_language")) or config.ui_language
+    return jsonify({"language": language,
                     "default": language_policy.DEFAULT_LANGUAGE,
                     "supported": list(SUPPORTED_LANGUAGES),
                     "answer_languages": language_policy.supported(),
@@ -276,17 +289,15 @@ def get_ui_language():
 
 @settings_bp.route('/api/settings/lang', methods=['POST'])
 def set_ui_language():
-    import config
     data = request.get_json() or {}
     lang = language_policy.normalize(data.get("language"))
     if lang not in SUPPORTED_LANGUAGES:
         return jsonify({"error": "Язык интерфейса не поддерживается. Доступны: "
                                  + ", ".join(SUPPORTED_LANGUAGES)}), 400
-    config.save_ui_language(lang)
     # Язык запоминается ещё и в сессии: у каждого посетителя он свой, а
     # language_policy читает сессию при каждом запросе к модели.
     language_policy.set_session_language(lang)
-    return jsonify({"success": True, "language": config.ui_language,
+    return jsonify({"success": True, "language": lang,
                     "answer_language": language_policy.english_name(lang)})
 
 

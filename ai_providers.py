@@ -1,18 +1,25 @@
 """
 ai_providers.py — Запросы к AI провайдерам (Groq, Gemini, OpenAI-compatible)
 """
-import os
 import json
-import time
-import re
 import logging
-from datetime import datetime, timezone
+import os
+import re
+import time
+from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
+
 import requests
-from groq_rotation import get_groq_key, mark_groq_key_exhausted, GROQ_KEY_COOLDOWN, mark_groq_key_success
-import provider_manager as pm
+
 import language_policy
 import local_providers
+import provider_manager as pm
+from groq_rotation import (
+    GROQ_KEY_COOLDOWN,
+    get_groq_key,
+    mark_groq_key_exhausted,
+    mark_groq_key_success,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -128,8 +135,8 @@ def _retry_after_seconds(headers, default=60):
                 try:
                     when = parsedate_to_datetime(value)
                     if when.tzinfo is None:
-                        when = when.replace(tzinfo=timezone.utc)
-                    seconds = int((when - datetime.now(timezone.utc)).total_seconds())
+                        when = when.replace(tzinfo=UTC)
+                    seconds = int((when - datetime.now(UTC)).total_seconds())
                     if seconds > 0:
                         candidates.append(min(seconds, _MAX_COOLDOWN_SECONDS))
                 except (TypeError, ValueError, OverflowError):
@@ -297,6 +304,8 @@ def _gemini_request_with_key(model, payload, key, timeout=90):
     parts, tool_calls = [], []
     for candidate in data.get("candidates", []):
         for part in (candidate.get("content") or {}).get("parts", []):
+            if isinstance(part, dict) and part.get("thought"):
+                continue
             if part.get("text"):
                 parts.append(part["text"])
             call = part.get("functionCall") if isinstance(part, dict) else None
@@ -784,7 +793,7 @@ def _local_request_options(model, extra=None, *, reasoning=False,
         return local_providers.request_options(
             str(model or ""), extra=extra, reasoning=reasoning,
             json_mode=json_mode, json_schema=json_schema)
-    except Exception:                                      # noqa: BLE001
+    except Exception:
         logger.debug("local request options failed", exc_info=True)
         return dict(extra or {})
 
@@ -903,17 +912,12 @@ def _chat_completion_once(messages, provider=None, model=None, system=None,
             text = "".join(str(p.get("text", "")) for p in text if isinstance(p, dict))
         text = str(text)
         tool_calls = normalize_tool_calls(message.get("tool_calls"))
-        thought = (message.get("reasoning") or message.get("reasoning_content")
-                   or message.get("thinking") or "")
-        thought = thought if isinstance(thought, str) else ""
-        if not text.strip() and thought.strip() and not tool_calls:
-            text = thought
     except (AttributeError, IndexError, TypeError):
         logger.warning("Неожиданный формат ответа (provider=%s, model=%s)", provider, model, exc_info=True)
         return None, "Провайдер вернул ответ в неожиданном формате"
     if not text.strip() and not tool_calls:
-        logger.warning("Пустые content и reasoning (provider=%s, model=%s)", provider, model)
-        return None, "Провайдер вернул пустой ответ (content и reasoning отсутствуют)"
+        logger.warning("Провайдер вернул пустой content (provider=%s, model=%s)", provider, model)
+        return None, "Провайдер вернул пустой ответ (content отсутствует)"
     degraded_fields = list((local_caps or {}).get("degraded") or [])
     result_meta = {"provider": provider, "model": model, "offline": False,
                    "tool_calls": tool_calls,
@@ -956,13 +960,12 @@ def _chat_stream_once(messages, provider=None, model=None, system=None, temperat
                 max_tokens=None, timeout=90, reasoning=False, reasoning_effort="low"):
     """
     Потоковый ответ. Генератор кортежей (kind, text), где kind:
-      "reasoning" — ход мыслей модели (если провайдер его отдаёт),
-      "token"     — текст ответа,
+      "token"     — только текст ответа,
       "error"     — ошибка (текст),
       "done"      — конец потока.
 
-    Если модель не умеет отдавать рассуждения, а режим включён — сначала
-    выполняется короткий «план рассуждений», затем основной ответ.
+    Reasoning от провайдера намеренно отбрасывается и не становится частью
+    user-facing stream.
     """
     provider, model, cfg = resolve_target(provider, model)
     system = language_policy.apply_to_system(system)
@@ -972,7 +975,8 @@ def _chat_stream_once(messages, provider=None, model=None, system=None, temperat
         import local_llm
         payload_messages = ([{"role": "system", "content": system}] if system else []) + list(messages or [])
         for kind, chunk in local_llm.stream(payload_messages, reasoning=want_reasoning):
-            yield kind, chunk
+            if kind != "reasoning":
+                yield kind, chunk
         yield "done", ""
         return
 
@@ -1001,7 +1005,6 @@ def _chat_stream_once(messages, provider=None, model=None, system=None, temperat
 
     # Предварительный «план рассуждений» для моделей без нативного reasoning.
     prepass_needed = want_reasoning and not (provider == "groq" and supports_reasoning(model))
-    produced_reasoning = False
 
     if prepass_needed:
         plan_messages = list(messages or []) + [{
@@ -1017,45 +1020,24 @@ def _chat_stream_once(messages, provider=None, model=None, system=None, temperat
         plan_payload["max_tokens"] = 400
         plan_payload["temperature"] = 0.4
         for kind, chunk in _raw_stream(provider, model, plan_payload, cfg, timeout):
-            if kind == "token":
-                produced_reasoning = True
-                yield "reasoning", chunk
-            elif kind == "error":
+            if kind == "error":
                 # План не получился — не роняем основной ответ.
                 logger.warning("Reasoning prepass failed: %s", chunk)
                 break
 
     tokens_seen = False
-    reasoning_tail = []
     for kind, chunk in _raw_stream(provider, model, payload, cfg, timeout):
-        if kind == "reasoning":
-            produced_reasoning = True
-            reasoning_tail.append(chunk)
-            if len(reasoning_tail) > 400:
-                reasoning_tail.pop(0)
-        elif kind == "token":
+        if kind == "token":
             tokens_seen = True
-            reasoning_tail = []
         if kind == "error":
             if tokens_seen:
                 yield "error", f"Ответ получен не полностью: поток оборвался после части текста. {chunk}"
             else:
                 yield "error", chunk
             continue
-        yield kind, chunk
+        if kind == "token":
+            yield kind, chunk
 
-    # Не показываем пользователю служебные теги из хвоста reasoning.
-    if not tokens_seen and reasoning_tail:
-        tail = _clean_reasoning_tail("".join(reasoning_tail))
-        if tail:
-            yield "token", tail
-
-    if want_reasoning and not produced_reasoning:
-        yield "reasoning", (
-            "Модель не передала внутренний ход рассуждений — "
-            "сразу сформировала ответ. Включите модель с поддержкой reasoning "
-            "(например, gpt-oss-120b), чтобы видеть развёрнутую цепочку мыслей."
-        )
     yield "done", ""
 
 
@@ -1078,7 +1060,7 @@ def chat_stream(messages, provider=None, model=None, system=None, temperature=0.
         temperature=temperature, max_tokens=max_tokens, timeout=timeout,
         reasoning=reasoning, reasoning_effort=reasoning_effort,
     ):
-        if kind != "done":
+        if kind not in ("done", "reasoning"):
             yield kind, chunk
     yield "done", ""
 
@@ -1430,7 +1412,7 @@ def local_runtime_status(force: bool = False) -> dict:
     return status
 
 def fetch_available_models(provider, force=False):
-    from config import PROVIDERS, MODEL_CACHE, has_credentials
+    from config import MODEL_CACHE, PROVIDERS, has_credentials
     if not force and provider in MODEL_CACHE:
         return MODEL_CACHE[provider]
 

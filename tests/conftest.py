@@ -1,14 +1,55 @@
 """Общие фикстуры: изолированное окружение без API-ключей и тестовый клиент Flask."""
 import os
 import sys
+import tempfile
 
 import pytest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
+os.environ.setdefault(
+    "NOVAMIND_DB_PATH",
+    os.path.join(tempfile.gettempdir(), f"novamind-test-bootstrap-{os.getpid()}.db"),
+)
 
-import config  # noqa: E402 — после правки sys.path
+# `config` читает `.env` при импорте, поэтому provider credentials и endpoint
+# overrides должны быть обезврежены до его импорта и до application modules.
+KEY_VARS = (
+    "GEMINI_API_KEY", "GOOGLE_AI_STUDIO_KEY", "OPENROUTER_API_KEY", "GROQ_API_KEY",
+    "GROQ_API_KEY_1", "GROQ_API_KEY_2", "CEREBRAS_API_KEY", "OPENAI_API_KEY",
+    "OPENAI_API_BASE", "OPENAI_BASE_URL", "OPENAI_COMPATIBLE_URL", "LOCAL_LLM_URL",
+    "OPENAI_COMPATIBLE_KEY", "LOCAL_LLM_API_KEY",
+    "IMAGE_GENERATION_URL", "IMAGE_EDIT_URL", "IMAGE_MODEL", "IMAGE_API_KEY",
+    "AUDIO_TTS_URL", "AUDIO_TTS_MODEL", "AUDIO_API_KEY",
+    "VIDEO_API_URL", "VIDEO_MODEL", "VIDEO_API_KEY", "POLLINATIONS_TOKEN",
+    "POLLINATIONS_API_KEY", "POLLINATIONS_KEY", "MEDIA_ALLOW_PAID",
+)
+for _provider_var in KEY_VARS:
+    # Пустое значение не даёт config.py восстановить ключ через setdefault из .env.
+    os.environ[_provider_var] = ""
+
+from flask.testing import FlaskClient
+from werkzeug.datastructures import Headers
+
+import config  # Delayed until after test environment initialization.
+
+
+class CsrfTestClient(FlaskClient):
+    """Make ordinary tests use the real double-submit CSRF contract."""
+
+    def open(self, *args, **kwargs):
+        method = str(kwargs.get("method", "GET")).upper()
+        headers = Headers(kwargs.get("headers"))
+        if method not in {"GET", "HEAD", "OPTIONS", "TRACE"} and "X-CSRF-Token" not in headers:
+            cookie = self.get_cookie("nova_csrf")
+            if cookie is None:
+                super().open("/api/csrf-token", method="GET")
+                cookie = self.get_cookie("nova_csrf")
+            if cookie is not None:
+                headers["X-CSRF-Token"] = cookie.value
+            kwargs["headers"] = headers
+        return super().open(*args, **kwargs)
 
 #: Заводские настройки озвучки: снимок до того, как тесты начали их менять.
 SPEECH_DEFAULTS = dict(config.speech_settings)
@@ -19,21 +60,15 @@ def reset_speech_settings():
     config.speech_settings.clear()
     config.speech_settings.update(SPEECH_DEFAULTS)
 
-KEY_VARS = (
-    "GEMINI_API_KEY", "GOOGLE_AI_STUDIO_KEY", "OPENROUTER_API_KEY", "GROQ_API_KEY",
-    "GROQ_API_KEY_1", "GROQ_API_KEY_2", "CEREBRAS_API_KEY", "OPENAI_API_KEY",
-    "IMAGE_GENERATION_URL", "IMAGE_EDIT_URL", "IMAGE_MODEL", "IMAGE_API_KEY",
-    "AUDIO_TTS_URL", "AUDIO_TTS_MODEL", "AUDIO_API_KEY",
-    "VIDEO_API_URL", "VIDEO_MODEL", "VIDEO_API_KEY", "POLLINATIONS_TOKEN",
-    "POLLINATIONS_API_KEY", "POLLINATIONS_KEY", "MEDIA_ALLOW_PAID",
-)
-
-
 @pytest.fixture(autouse=True)
 def isolated_env(tmp_path, monkeypatch):
     """Каждый тест: чистые ключи, своя папка медиа, свои runtime-настройки."""
     for var in KEY_VARS:
         monkeypatch.delenv(var, raising=False)
+    # config/.env must not decide whether a test silently waits for approval.
+    monkeypatch.setenv("AGENT_CONFIRM", "danger")
+    # No test gets the host fallback merely by importing the application.
+    monkeypatch.delenv("TERMINAL_HOST_EXECUTION", raising=False)
     # Подтверждение опасных действий в тестах не ждёт 120 секунд:
     # тест, которому нужен таймаут, выставляет своё значение сам.
     monkeypatch.setenv("AGENT_CONFIRM_TIMEOUT", "0.05")
@@ -124,7 +159,9 @@ def client(tmp_path, monkeypatch, isolated_env):
 
     from app import app as flask_app
     flask_app.config.update(TESTING=True)
+    flask_app.test_client_class = CsrfTestClient
     with flask_app.test_client() as test_client:
+        test_client.get("/api/csrf-token")
         yield test_client
 
 
@@ -152,10 +189,11 @@ class FakeResponse:
 # ══════════════ «маленький Linux»: песочница и вход администратора ══════════════
 @pytest.fixture
 def sandbox(tmp_path, monkeypatch):
-    """Отдельная песочница и включённое окружение + вход администратора."""
+    """Temporary test workspace; explicit host-command opt-in, not OS isolation."""
     import os
-    import routes.terminal as term_routes
+
     import routes.agent as agent_routes
+    import routes.terminal as term_routes
 
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -171,6 +209,9 @@ def sandbox(tmp_path, monkeypatch):
                         lambda query, num=8: agent_routes.nova_search(query, limit=num))
     monkeypatch.setenv("TERMINAL_ENABLED", "1")
     monkeypatch.setenv("AGENT_ENABLED", "1")
+    # Only tests requesting this fixture may run their hard-coded allowlisted
+    # integration commands. Production remains fail-closed by default.
+    monkeypatch.setenv("TERMINAL_HOST_EXECUTION", "1")
     return workspace
 
 
@@ -199,4 +240,3 @@ def nick_client(client, sandbox):
     response = client.post("/api/session/login", json={"nick": "Мария"})
     assert response.status_code == 200
     return client
-

@@ -226,6 +226,7 @@ def test_shell_timeout_and_oom_hints_are_actionable():
 
 
 def test_slow_install_operations_get_bounded_longer_timeouts(monkeypatch):
+    monkeypatch.setenv("TERMINAL_HOST_EXECUTION", "1")
     calls = []
     monkeypatch.setattr(terminal_routes, "run_command", lambda command, timeout=None, cancel=None:
                         (calls.append((command, timeout)) or {"code": 0, "stdout": "", "stderr": ""}))

@@ -15,9 +15,11 @@ import os
 import re
 import time
 import threading
+import ipaddress
+import socket
 import concurrent.futures
 from concurrent.futures import ThreadPoolExecutor
-from urllib.parse import urlparse, quote_plus, urlencode, quote
+from urllib.parse import urlparse, urljoin, quote_plus, urlencode, quote
 
 import httpx
 import requests
@@ -55,6 +57,8 @@ SEARXNG_INSTANCES = [
 
 SEARCH_TIMEOUT = float(os.getenv("SEARCH_TIMEOUT", "9"))
 READER_TIMEOUT = float(os.getenv("READER_TIMEOUT", "10"))
+READER_MAX_REDIRECTS = 5
+READER_MAX_BYTES = 2 * 1024 * 1024
 # Сколько ждём модель после сбора источников. У reasoning-моделей первый токен
 # приходит долго, поэтому времени заметно больше, чем у обычного поиска.
 ANSWER_TIMEOUT = float(os.getenv("ANSWER_TIMEOUT", "1200"))
@@ -923,26 +927,98 @@ def _github_page_text(url, max_chars=6000):
         return "", f"GitHub API: {type(exc).__name__}"
 
 
+def _resolved_public_addresses(hostname):
+    """Return DNS answers only when every address is publicly routable.
+
+    This intentionally fails closed: a hostname is rejected if DNS cannot be
+    resolved or if even one returned address is loopback, private, link-local,
+    reserved, multicast, unspecified, or otherwise non-global.  The check is
+    repeated for every redirect target; it is not a substitute for an OS-level
+    network sandbox, but prevents the common SSRF and redirect/DNS-rebinding
+    paths available to this standard HTTP client.
+    """
+    try:
+        addresses = {
+            ipaddress.ip_address(info[4][0])
+            for info in socket.getaddrinfo(hostname, None, type=socket.SOCK_STREAM)
+        }
+    except (OSError, ValueError):
+        return None
+    if not addresses or any(not address.is_global for address in addresses):
+        return None
+    return addresses
+
+
+def _validate_public_http_url(url):
+    """Validate a fetch URL and resolve its hostname before opening a socket."""
+    try:
+        parsed = urlparse(str(url))
+        if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
+            return False
+        if parsed.username is not None or parsed.password is not None:
+            return False
+        return bool(_resolved_public_addresses(parsed.hostname))
+    except (TypeError, ValueError):
+        return False
+
+
+def _read_limited_response(response, max_bytes=READER_MAX_BYTES):
+    """Read an httpx response with a hard byte ceiling and close it."""
+    try:
+        declared = response.headers.get("content-length")
+        if declared and int(declared) > max_bytes:
+            return None
+        chunks, total = [], 0
+        for chunk in response.iter_bytes():
+            total += len(chunk)
+            if total > max_bytes:
+                return None
+            chunks.append(chunk)
+        return b"".join(chunks)
+    finally:
+        response.close()
+
+
 def fetch_page_text(url, max_chars=6000):
-    """Читает HTML-страницу напрямую через httpx и очищает её BeautifulSoup4."""
-    if not url or not url.lower().startswith(("http://", "https://")):
+    """Read a public HTML page with bounded, manually validated redirects."""
+    if not _validate_public_http_url(url):
         return None, "некорректный URL"
     if urlparse(url).netloc.lower() in {"github.com", "www.github.com"}:
         github_result = _github_page_text(url, max_chars)
         if github_result is not None:
             return github_result
 
+    current_url = str(url)
     try:
-        resp = httpx.get(url, headers=_HEADERS, timeout=READER_TIMEOUT,
-                         follow_redirects=True)
-        resp.raise_for_status()
-        content_type = resp.headers.get("content-type", "")
-        if "html" not in content_type and "text" not in content_type:
-            return None, "не текстовая страница"
-        text = _html_to_text(resp.text)
-        if not text:
-            return None, "пустая страница"
-        return text[:max_chars], None
+        timeout = httpx.Timeout(READER_TIMEOUT)
+        with httpx.Client(headers=_HEADERS, timeout=timeout, follow_redirects=False) as client:
+            for _ in range(READER_MAX_REDIRECTS + 1):
+                # Re-resolve immediately before every request, including after
+                # redirects, to reduce DNS-rebinding exposure.
+                if not _validate_public_http_url(current_url):
+                    return None, "запрещённый адрес"
+                request = client.build_request("GET", current_url)
+                response = client.send(request, follow_redirects=False, stream=True)
+                if response.is_redirect:
+                    location = response.headers.get("location")
+                    response.close()
+                    target = urljoin(current_url, location or "")
+                    if not location or not _validate_public_http_url(target):
+                        return None, "запрещённый redirect"
+                    current_url = target
+                    continue
+                response.raise_for_status()
+                content_type = response.headers.get("content-type", "")
+                body = _read_limited_response(response)
+                if body is None:
+                    return None, "слишком большой ответ"
+                if "html" not in content_type and "text" not in content_type:
+                    return None, "не текстовая страница"
+                text = _html_to_text(body.decode("utf-8", errors="replace"))
+                if not text:
+                    return None, "пустая страница"
+                return text[:max_chars], None
+        return None, "слишком много redirect"
     except httpx.HTTPError as exc:
         return None, f"{exc.__class__.__name__}"
 
@@ -1196,7 +1272,9 @@ def _stream_answer(messages, system, provider, model, reasoning=False, timeout=N
                                        system=system, temperature=0.3,
                                        reasoning=reasoning, timeout=timeout):
             if kind == "reasoning":
-                yield {"type": "reasoning", "token": chunk}
+                # Provider reasoning is internal chain-of-thought; never send
+                # it to the client or include it in the persisted answer.
+                continue
             elif kind == "token":
                 pieces.append(chunk)
                 yield {"type": "token", "token": chunk}

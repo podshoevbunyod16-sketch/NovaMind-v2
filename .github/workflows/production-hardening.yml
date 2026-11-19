@@ -1,0 +1,194 @@
+name: Production hardening
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: production-hardening-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHONUNBUFFERED: "1"
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+
+jobs:
+  pytest:
+    name: pytest regression suite
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+      - name: Install test dependencies
+        run: python -m pip install -r requirements-dev.txt
+      - name: Run pytest with external network disabled
+        env:
+          PYTHONPATH: "${{ github.workspace }}/tests/network_isolation:${{ github.workspace }}"
+        run: python -m pytest -q tests
+
+  frontend-smoke:
+    name: frontend smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - name: Install dependencies
+        run: |
+          python -m pip install -r requirements-dev.txt
+          npm install --no-audit --no-fund
+      - name: Start NovaMind with external network disabled
+        env:
+          PYTHONPATH: "${{ github.workspace }}/tests/network_isolation:${{ github.workspace }}"
+        run: |
+          TERMINAL_ENABLED=1 nohup python app.py > server.log 2>&1 &
+          for i in $(seq 1 40); do
+            if curl --fail --silent http://127.0.0.1:5000/chat > /dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "NovaMind did not become ready" >&2
+          exit 1
+      - name: Run frontend smoke
+        run: node tests/frontend/smoke.mjs http://127.0.0.1:5000
+      - name: Upload server log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-server-log
+          path: server.log
+          if-no-files-found: ignore
+          retention-days: 7
+
+  dependency-audit:
+    name: pip-audit report
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements.txt
+      - name: Install audit tool
+        run: python -m pip install pip-audit
+      - name: Audit runtime dependencies (report-only)
+        run: |
+          python -m pip_audit -r requirements.txt --format json --output pip-audit.json || true
+          if test -f pip-audit.json; then
+            python -m json.tool pip-audit.json > pip-audit.pretty.json
+            cat pip-audit.pretty.json
+          fi
+      - name: Upload pip-audit report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pip-audit-report
+          path: pip-audit.pretty.json
+          if-no-files-found: ignore
+          retention-days: 7
+
+  bandit:
+    name: Bandit high-severity gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+      - name: Install Bandit
+        run: python -m pip install bandit
+      - name: Generate medium-severity report (report-only)
+        run: |
+          python -m bandit -r . --exclude ./.git,./.venv,./node_modules -ll --exit-zero -f json -o bandit-medium.json
+      - name: Enforce high-severity Bandit gate
+        run: |
+          python -m bandit -r . --exclude ./.git,./.venv,./node_modules -lll -f json -o bandit-high.json
+      - name: Upload Bandit reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bandit-reports
+          path: |
+            bandit-medium.json
+            bandit-high.json
+          if-no-files-found: ignore
+          retention-days: 7
+
+  gitleaks:
+    name: Gitleaks secret scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Scan repository for secrets
+        uses: gitleaks/gitleaks-action@v2
+        with:
+          args: --redact --no-banner --report-format json --report-path gitleaks.json
+      - name: Upload redacted Gitleaks report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gitleaks-report
+          path: gitleaks.json
+          if-no-files-found: ignore
+          retention-days: 7
+
+  ruff-no-new-diagnostics:
+    name: Ruff no-new-diagnostics gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install pinned Ruff
+        run: python -m pip install "ruff==0.17.5"
+      - name: Select baseline revision
+        id: baseline
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PUSH_BEFORE_SHA: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          if [[ "$EVENT_NAME" == "pull_request" ]]; then
+            BASE_SHA="$PR_BASE_SHA"
+          elif [[ "$EVENT_NAME" == "push" && "$PUSH_BEFORE_SHA" != "0000000000000000000000000000000000000000" ]]; then
+            BASE_SHA="$PUSH_BEFORE_SHA"
+          else
+            BASE_SHA="$(git rev-parse HEAD^)"
+          fi
+          git cat-file -e "${BASE_SHA}^{commit}"
+          echo "sha=$BASE_SHA" >> "$GITHUB_OUTPUT"
+      - name: Fail only for newly introduced Ruff findings
+        run: python scripts/ruff_baseline_gate.py --base "${{ steps.baseline.outputs.sha }}"

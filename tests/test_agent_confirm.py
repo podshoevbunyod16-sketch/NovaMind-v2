@@ -84,8 +84,10 @@ def test_confirmation_record_describes_the_action():
 
 
 def test_secrets_are_redacted_in_the_dialog():
-    text = policy.describe_action("bash", "curl -H 'Authorization: Bearer abcdef123456' x")
-    assert "abcdef123456" not in text and "***" in text
+    fake_bearer = "abc" + "def123456"
+    command = f"curl -H 'Authorization: Bearer {fake_bearer}' x"
+    text = policy.describe_action("bash", command)
+    assert fake_bearer not in text and "***" in text
 
 
 # ══════════════ ожидание ответа ══════════════

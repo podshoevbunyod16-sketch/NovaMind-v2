@@ -1,11 +1,11 @@
 """Движок генерации: реальные запросы провайдерам, реальные ошибки, никакого выдуманного прогресса."""
 import base64
 import os
+import threading
 
-import pytest
+from conftest import FakeResponse
 
 import media_generation as mg
-from conftest import FakeResponse
 
 PNG_BYTES = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
@@ -48,7 +48,8 @@ def test_google_image_sends_response_modalities_and_saves_file(gemini_key, monke
     assert result["mime"] == "image/png"
     assert result["url"].startswith("/media/")
     assert os.path.isfile(result["path"])
-    assert open(result["path"], "rb").read() == PNG_BYTES
+    with open(result["path"], "rb") as handle:
+        assert handle.read() == PNG_BYTES
     # Статусы — реальные шаги запроса, без процентов.
     assert any("Отправка запроса к Google AI Studio" in s for s in events)
     assert not any("%" in s for s in events)
@@ -91,7 +92,8 @@ def test_google_tts_uses_speech_config_and_saves_wav(gemini_key, monkeypatch):
     assert speech["voiceName"] == "Kore"
     assert captured["body"]["generationConfig"]["responseModalities"] == ["AUDIO"]
     assert result["kind"] == "audio" and result["filename"].endswith(".wav")
-    assert open(result["path"], "rb").read() == WAV_BYTES
+    with open(result["path"], "rb") as handle:
+        assert handle.read() == WAV_BYTES
 
 
 def test_tts_is_free_and_needs_no_confirmation(gemini_key):
@@ -444,6 +446,40 @@ def test_job_polling_reports_provider_failure(gemini_key, monkeypatch):
     assert "prompt blocked" in record["error"]
 
 
+def test_concurrent_job_poll_is_serialized(gemini_key, monkeypatch):
+    job_id = mg.register_job({
+        "provider": "google_ai_studio",
+        "operation": "operations/poll-race",
+        "state": "queued",
+    })
+    calls = []
+    entered = threading.Event()
+    release = threading.Event()
+
+    def fake_get(*_args, **_kwargs):
+        calls.append("poll")
+        entered.set()
+        release.wait(2)
+        return FakeResponse(200, json_data={"done": False})
+
+    monkeypatch.setattr(mg.requests, "get", fake_get)
+    results = []
+    worker = threading.Thread(target=lambda: results.append(mg.poll_job(job_id)))
+    worker.start()
+    try:
+        assert entered.wait(2)
+        overlapping = mg.poll_job(job_id)
+        assert overlapping["polls"] == 0
+    finally:
+        release.set()
+        worker.join(3)
+
+    assert not worker.is_alive()
+    assert calls == ["poll"]
+    assert results[0]["state"] == "running"
+    assert results[0]["polls"] == 1
+
+
 # ---------- Общие проверки ----------
 def test_empty_prompt_is_rejected(gemini_key):
     result, error = mg.generate_media(model_for("gemini-3.8-flash-tts"), "   ")
@@ -475,3 +511,17 @@ def test_saved_files_go_to_media_dir(gemini_key, monkeypatch, tmp_path):
     assert error is None
     assert os.path.dirname(result["path"]) == mg.MEDIA_DIR
     assert os.path.dirname(mg.MEDIA_DIR) == str(tmp_path)
+
+
+def test_discard_refuses_to_treat_remote_url_as_local_file():
+    mg.ensure_media_dir()
+    sentinel = os.path.join(mg.MEDIA_DIR, "remote-collision.mp4")
+    with open(sentinel, "wb") as handle:
+        handle.write(b"keep this local file")
+
+    assert not mg.discard_media_file({
+        "filename": "remote-collision.mp4",
+        "url": "https://provider.test/remote-collision.mp4?token=secret",
+    })
+    with open(sentinel, "rb") as handle:
+        assert handle.read() == b"keep this local file"

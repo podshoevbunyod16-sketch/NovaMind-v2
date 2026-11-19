@@ -39,6 +39,7 @@ def test_manual_terminal_and_react_share_one_owned_workspace(client, monkeypatch
     from tests.agent_helpers import script, ndjson, events_of
     monkeypatch.setenv('AGENT_WORKSPACE_ROOT', str(tmp_path / 'chats'))
     monkeypatch.setenv('TERMINAL_ENABLED', '1')
+    monkeypatch.setenv('TERMINAL_HOST_EXECUTION', '1')
     with client.session_transaction() as sess:
         sess['admin_logged_in'] = True
         sess['admin_username'] = 'tester'
