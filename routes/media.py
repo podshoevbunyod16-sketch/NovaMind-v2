@@ -9,7 +9,7 @@ import uuid
 import mimetypes
 import base64
 import zipfile
-import xml.etree.ElementTree as ET
+from defusedxml import ElementTree as ET
 import requests
 from ai_providers import chat_completion
 from groq_rotation import get_groq_key, GROQ_KEYS
@@ -25,12 +25,15 @@ def generated_image():
     filename = request.args.get("file", "")
     if not filename:
         return jsonify({"error": "No filename"}), 400
-    safe_name = os.path.basename(filename.replace("..", ""))
-    img_dir = mg.IMAGE_DIR
-    filepath = os.path.join(img_dir, safe_name)
-    if not os.path.exists(filepath):
+    import upload_security
+
+    safe_name = upload_security.normalize_filename(filename)
+    img_dir = os.path.realpath(mg.IMAGE_DIR)
+    filepath = os.path.realpath(os.path.join(img_dir, safe_name))
+    if not filepath.startswith(img_dir + os.sep) or not os.path.isfile(filepath):
         return jsonify({"error": "File not found"}), 404
-    return send_file(filepath, mimetype=mimetypes.guess_type(filepath)[0] or 'image/png')
+    return send_file(filepath, mimetype=mimetypes.guess_type(filepath)[0] or 'image/png',
+                     as_attachment=False, download_name=safe_name)
 
 
 # ========== ЗАГРУЗКА ФАЙЛОВ ==========
@@ -51,9 +54,23 @@ def analyze_attachment():
     if not uploaded or not uploaded.filename:
         return jsonify({'error': 'Файл не выбран'}), 400
 
-    filename = os.path.basename(uploaded.filename)
-    ext = os.path.splitext(filename)[1].lower()
-    content_type = uploaded.mimetype or mimetypes.guess_type(filename)[0] or 'application/octet-stream'
+    import upload_security
+
+    raw_name = uploaded.filename or ''
+    head = uploaded.stream.read(512)
+    try:
+        uploaded.stream.seek(0, os.SEEK_END)
+        declared_size = uploaded.stream.tell()
+        uploaded.stream.seek(0)
+    except (OSError, ValueError):
+        declared_size = None
+    declared_type = uploaded.mimetype or mimetypes.guess_type(raw_name)[0] or 'application/octet-stream'
+    filename, ext, content_type, problem = upload_security.validate_upload(
+        raw_name, declared_type, head, declared_size)
+    if problem == 'TOO_LARGE':
+        return jsonify({'error': 'Файл слишком большой. Максимальный размер анализа — 25 МБ.'}), 413
+    if problem:
+        return jsonify({'error': 'Недопустимый файл: ' + problem}), 415
     user_desc = (request.form.get('description') or '').strip()
 
     # Файл нужен только на время анализа: складываем его во временную папку
@@ -64,10 +81,14 @@ def analyze_attachment():
     uploaded.save(filepath)
 
     try:
-        if os.path.getsize(filepath) > 25 * 1024 * 1024:
+        if os.path.getsize(filepath) > upload_security.MAX_UPLOAD_BYTES:
             return jsonify({'error': 'Файл слишком большой. Максимальный размер анализа — 25 МБ.'}), 413
+        if problem := upload_security.check_zip_bomb(filepath):
+            return jsonify({'error': problem}), 415
+        if problem := upload_security.antivirus_hook(filepath):
+            return jsonify({'error': problem}), 415
 
-        is_image = content_type.startswith('image/') or ext in {'.jpg','.jpeg','.png','.webp','.gif','.bmp'}
+        is_image = ext in upload_security.IMAGE_EXTENSIONS or content_type.startswith('image/')
         if is_image:
             return _analyze_image_file(filepath, filename, content_type, user_desc)
 
@@ -130,8 +151,8 @@ def _extract_attachment_text(filepath, ext, content_type):
         try:
             from pypdf import PdfReader
             return '\n\n'.join((page.extract_text() or '') for page in PdfReader(filepath).pages)
-        except ImportError:
-            raise RuntimeError('PDF: зависимость pypdf не установлена.')
+        except ImportError as exc:
+            raise RuntimeError('PDF: зависимость pypdf не установлена.') from exc
 
     if ext == '.docx':
         try:
@@ -142,8 +163,8 @@ def _extract_attachment_text(filepath, ext, content_type):
                 for row in table.rows:
                     parts.append(' | '.join(cell.text.strip() for cell in row.cells))
             return '\n'.join(parts)
-        except ImportError:
-            raise RuntimeError('DOCX: зависимость python-docx не установлена.')
+        except ImportError as exc:
+            raise RuntimeError('DOCX: зависимость python-docx не установлена.') from exc
 
     if ext in {'.xlsx','.xlsm'}:
         try:
@@ -157,8 +178,8 @@ def _extract_attachment_text(filepath, ext, content_type):
                     if any(values):
                         parts.append(' | '.join(values))
             return '\n'.join(parts)
-        except ImportError:
-            raise RuntimeError('XLSX: зависимость openpyxl не установлена.')
+        except ImportError as exc:
+            raise RuntimeError('XLSX: зависимость openpyxl не установлена.') from exc
 
     if ext == '.pptx':
         with zipfile.ZipFile(filepath) as z:

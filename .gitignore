@@ -33,3 +33,9 @@ mcp_connections.json
 traces/
 knowledge.db
 evals/report.json
+
+# Загруженные пользовательские файлы: не попадают в репозиторий
+routes/uploads/
+
+.coverage
+coverage.xml

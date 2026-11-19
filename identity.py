@@ -48,7 +48,8 @@ def chat_owner(sess=None):
     email = str(sess.get("nova_user_email") or "").strip().lower()
     if email and sess.get("nova_google_login"):
         return ("email:" + email)[:200]
-    if sess.get("admin_logged_in"):
+    import auth
+    if auth.is_admin(sess):
         name = str(sess.get("admin_username") or "admin").strip().lower()
         return ("admin:" + name)[:200]
     return "anon:" + browser_id(sess)

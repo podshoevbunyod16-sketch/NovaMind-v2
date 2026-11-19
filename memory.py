@@ -63,7 +63,8 @@ def user_key(session, signed_in) -> str:
         if value:
             return value.lower()[:180]
     nick = str(session.get("nova_user_nick") or session.get("username") or "").strip().lower()
-    if session.get("admin_logged_in"):
+    import auth
+    if auth.is_admin():
         return (nick or "admin")[:180]
     if nick:
         from identity import browser_id

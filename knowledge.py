@@ -78,7 +78,7 @@ _STOPWORDS = {
     "раз", "тоже", "себе", "под", "будет", "ж", "тогда", "кто", "этот", "того",
     "потому", "этого", "какой", "совсем", "ним", "здесь", "этом", "один",
     "почти", "мой", "тем", "чтобы", "нее", "неё", "были", "куда", "зачем",
-    "всех", "никогда", "можно", "при", "наконец", "два", "это", "эти", "этот",
+    "всех", "никогда", "можно", "при", "наконец", "два", "это", "эти",
     "the", "a", "an", "of", "to", "in", "on", "for", "and", "or", "is", "are",
     "was", "were", "be", "been", "it", "this", "that", "with", "as", "at", "by",
     "from", "we", "you", "they", "he", "she", "i", "not", "but", "if", "then",
@@ -425,8 +425,8 @@ class KnowledgeBase:
                 return []
             unique = sorted(set(terms))
             placeholders = ",".join("?" for _ in unique)
-            rows = conn.execute(
-                f"SELECT terms.term AS term, terms.chunk_id AS chunk_id, terms.tf AS tf, "
+            rows = conn.execute(  # nosec B608
+                f"SELECT terms.term AS term, terms.chunk_id AS chunk_id, terms.tf AS tf, "  # nosec B608
                 f"chunks.text AS text, chunks.tokens AS tokens, chunks.document_id AS document_id, "
                 f"documents.title AS title, documents.source AS source "
                 f"FROM terms JOIN chunks ON chunks.id = terms.chunk_id "

@@ -1,0 +1,113 @@
+name: NovaMind CI
+
+on:
+  push:
+    branches: [main, "arena/**", "agent/**"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-dev.txt pytest-cov ruff mypy bandit pip-audit
+      - name: Syntax check
+        run: python -m compileall -q -x '(\.venv|__pycache__|node_modules)' .
+      - name: Ruff
+        run: ruff check .
+      - name: MyPy (new typed modules)
+        run: mypy
+      - name: Tests with coverage gate
+        run: python -m pytest -q tests --cov --cov-report=term --cov-report=xml --cov-fail-under=70
+      - name: Bandit (medium+ severity, first-party)
+        run: |
+          files=$(git ls-files '*.py' | grep -vE '^(tests|examples|migrations)/')
+          bandit -q -ll $files
+      - name: Dependency audit
+        run: pip-audit -r requirements.txt
+      - name: Secret scan (working tree and history)
+        run: python scripts/scan_secrets.py --history
+
+  migration-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: python -m pip install -r requirements-dev.txt
+      - name: Verify Alembic baseline generates SQL
+        run: |
+          alembic upgrade head --sql > /tmp/schema.sql
+          grep -q 'CREATE TABLE chats' /tmp/schema.sql
+
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - run: |
+          python -m pip install -r requirements-dev.txt
+          npm install --no-audit --no-fund
+      - name: Start server
+        run: |
+          SCHEDULER_ENABLED=0 nohup python app.py > server.log 2>&1 &
+          for i in $(seq 1 40); do
+            curl -fsS http://127.0.0.1:5000/healthz > /dev/null && exit 0
+            sleep 1
+          done
+          exit 1
+      - run: node tests/frontend/smoke.mjs http://127.0.0.1:5000
+      - name: Server log on failure
+        if: failure()
+        run: tail -100 server.log
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build container image
+        run: docker build -t novamind-v2:ci .
+      - name: Smoke-check image health endpoint
+        run: |
+          docker run -d --name novamind-ci -p 5000:5000 \
+            -e APP_ENV=development -e COOKIE_SECURE=0 \
+            -e SESSION_SECRET=ci-only-session-secret-at-least-32-chars \
+            -e ADMIN_CODE=ci-only-admin-code novamind-v2:ci
+          for i in $(seq 1 30); do
+            curl -fsS http://127.0.0.1:5000/healthz > /dev/null && exit 0
+            sleep 1
+          done
+          docker logs novamind-ci
+          exit 1

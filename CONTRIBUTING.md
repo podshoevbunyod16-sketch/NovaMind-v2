@@ -48,8 +48,8 @@
 
 ```bash
 # Клонируй репозиторий
-git clone https://github.com/podshoevbunyod16-sketch/NovaMind.git
-cd NovaMind
+git clone https://github.com/podshoevbunyod16-sketch/NovaMind-v2.git
+cd NovaMind-v2
 
 # Создай свою ветку
 git checkout -b feature/название-фичи
@@ -399,3 +399,27 @@ source venv/bin/activate
 **Версия:** 1.0  
 **Статус:** Открыт для участников  
 🌟 **Спасибо за помощь в развитии NovaMind!**
+
+---
+
+## 🔒 Обязательные проверки перед PR
+
+```bash
+python -m pytest -q tests --cov --cov-fail-under=70
+ruff check .
+mypy
+bandit -q -ll $(git ls-files '*.py' | grep -vE '^(tests|examples|migrations)/')
+pip-audit -r requirements.txt
+python scripts/scan_secrets.py --history
+alembic upgrade head --sql > /tmp/schema.sql
+```
+
+Правила:
+
+1. Сначала прочитай существующий код и публичный интерфейс; добавь/обнови тест, затем патч.
+2. Не добавляй реальные ключи, токены, куки и пользовательские данные в код, тесты и логи.
+3. Изменение публичного API — только с migration note, deprecation warning и сохранением старого endpoint на переходный период.
+4. Изменения в терминале, загрузках, авторизации и агентных инструментах требуют security-теста и записи в `CHANGELOG.md`.
+5. Не отключай проверки ради зелёного CI; если check неприменим — объясни причину в PR.
+
+Подробнее: [SECURITY.md](SECURITY.md), [THREAT_MODEL.md](THREAT_MODEL.md), [ARCHITECTURE.md](ARCHITECTURE.md).

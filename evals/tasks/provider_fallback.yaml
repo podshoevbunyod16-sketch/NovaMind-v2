@@ -1,0 +1,18 @@
+# Деградация при недоступном провайдере: честное сообщение, без выдуманного успеха.
+id: fallback-01
+category: provider_fallback
+prompt: Сообщи пользователю, что выбранный AI-провайдер недоступен, и предложи доступные альтернативы.
+expect: провайдер
+max_steps: 3
+---
+id: fallback-02
+category: provider_fallback
+prompt: The configured provider timed out. Explain honestly that no answer was generated and suggest retrying.
+expect: timed out
+max_steps: 3
+---
+id: fallback-03
+category: provider_fallback
+prompt: Объясни разницу между ошибкой провайдера и ошибкой сети простым языком.
+expect: сети
+max_steps: 3

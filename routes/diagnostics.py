@@ -36,3 +36,10 @@ def system_health():
                     "linux":linux,
                     "agent":{"enabled":agent_on,"tools":tools,
                              "workspace":bool(linux.get("enabled"))}})
+
+
+@diagnostics_bp.get("/api/ai/capabilities")
+def ai_capabilities():
+    """Public model registry: context limits and features, never credentials."""
+    import provider_policy
+    return jsonify({"models": provider_policy.public_catalog()})

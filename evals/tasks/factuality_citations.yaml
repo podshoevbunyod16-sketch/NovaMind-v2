@@ -1,0 +1,27 @@
+# Фактичность и цитирование: ответ не должен выдумывать источники.
+id: fact-01
+category: factuality
+prompt: Найди официальную документацию Python про async/await и процитируй её, указав адрес страницы.
+tools: open
+expect: docs.python.org
+max_steps: 8
+---
+id: fact-02
+category: factuality
+prompt: Using an authoritative source, state what RFC defines HTTP status 404 and give its URL.
+tools: search
+expect: RFC
+max_steps: 8
+---
+id: citations-01
+category: citations
+prompt: Найди два независимых источника про кэширование HTTP и перечисли их заголовки и ссылки.
+tools: search
+expect: http
+max_steps: 8
+---
+id: citations-02
+category: citations
+prompt: What should an assistant do when it cannot verify a claim from its sources?
+expect: verify
+max_steps: 4

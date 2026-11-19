@@ -12,7 +12,10 @@ from flask import session
 
 import identity as _identity
 
-DB_PATH = os.path.join(os.path.dirname(__file__), "novamind_chats.db")
+# Локальная разработка: SQLite.  Для PostgreSQL используется DATABASE_URL и
+# Alembic (см. DATABASE_MIGRATIONS.md); прямой SQL в этом модуле остаётся
+# SQLite-совместимым и не требует SQLAlchemy в dev-окружении.
+DB_PATH = os.getenv("SQLITE_DB_PATH") or os.path.join(os.path.dirname(__file__), "novamind_chats.db")
 _db_lock = threading.Lock()
 
 def get_db():
@@ -451,7 +454,7 @@ def update_job(job_id, **fields):
     values = [fields[column] for column in columns] + [job_id]
     with _db_lock:
         with get_db() as conn:
-            conn.execute(f"UPDATE scheduled_jobs SET {assignments} WHERE id=?", values)
+            conn.execute(f"UPDATE scheduled_jobs SET {assignments} WHERE id=?", values)  # nosec B608
     return get_job(job_id)
 
 
@@ -749,7 +752,7 @@ def update_task(task_id, **fields):
     sets = ", ".join(f"{key}=?" for key in allowed)
     with _db_lock:
         with get_db() as conn:
-            conn.execute(f"UPDATE tasks SET {sets}, updated_at=? WHERE id=?",
+            conn.execute(f"UPDATE tasks SET {sets}, updated_at=? WHERE id=?",  # nosec B608
                          (*allowed.values(), time.time(), task_id))
     return get_task(task_id)
 
@@ -918,7 +921,7 @@ def update_agent_run(record_id, **fields):
     sets = ", ".join(f"{key}=?" for key in values)
     with _db_lock:
         with get_db() as conn:
-            conn.execute(f"UPDATE agent_runs SET {sets} WHERE id=?",
+            conn.execute(f"UPDATE agent_runs SET {sets} WHERE id=?",  # nosec B608
                          (*values.values(), record_id))
     return get_agent_run(record_id)
 

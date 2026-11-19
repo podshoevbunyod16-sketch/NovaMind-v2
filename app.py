@@ -16,22 +16,40 @@ app.py — Точка входа NovaMind. Только Flask init + регис�
 """
 import os
 import logging
-from flask import Flask, send_from_directory, redirect
+from flask import Flask, send_from_directory, redirect, jsonify, request
 
-from config import ADMIN_SESSION_KEY, ADMIN_CODE, ADMIN_CODE_IS_DEFAULT, load_plugins, PORT
+from config import ADMIN_SESSION_KEY, load_plugins, PORT
 from database import init_db
 from routes import ALL_BLUEPRINTS
+import observability
+import web_hardening
 
 # ---------- Flask ----------
 app = Flask(__name__, static_folder="static", template_folder="templates")
 app.secret_key = ADMIN_SESSION_KEY
 from datetime import timedelta as _timedelta  # noqa: E402
-app.permanent_session_lifetime = _timedelta(days=365)   # id браузера - основа изоляции данных
-app.config["MAX_CONTENT_LENGTH"] = 500 * 1024 * 1024  # 500 MB
+app.permanent_session_lifetime = _timedelta(days=90)  # короче: файлы Cookies хранятся на сервере
+web_hardening.init_app(app)
+observability.init_app(app)
 
 # ---------- Регистрация Blueprint'ов ----------
 for bp in ALL_BLUEPRINTS:
     app.register_blueprint(bp)
+
+
+@app.get("/healthz")
+def healthz():
+    return observability.health_response()
+
+
+@app.get("/readyz")
+def readyz():
+    return observability.ready_response()
+
+
+@app.get("/metrics")
+def metrics():
+    return observability.metrics_response()
 
 # ---------- Инициализация ----------
 init_db()
@@ -77,6 +95,19 @@ def _ensure_browser_identity():
     identity.browser_id()
 
 
+@app.before_request
+def _endpoint_rate_limit():
+    """Cheap per-IP caps for expensive endpoints; Redis backend can replace this."""
+    if request.method not in ("GET", "HEAD", "OPTIONS"):
+        import security
+        allowed, retry_after, _limit, _remaining, _scope = security.endpoint_limiter.check(request)
+        if not allowed:
+            response = jsonify({"error": "Слишком много запросов", "code": "rate_limited"})
+            response.headers["Retry-After"] = str(retry_after)
+            return response, 429
+    return None
+
+
 # ---------- Статика ----------
 @app.route('/static/<path:filename>')
 def static_files(filename):
@@ -110,8 +141,14 @@ if __name__ == '__main__':
     port = PORT
     debug = os.getenv("FLASK_DEBUG", "false").lower() == "true"
     logging.getLogger(__name__).info("Запуск NovaMind на порту %s, debug=%s", port, debug)
-    if ADMIN_CODE_IS_DEFAULT:
+    if web_hardening.is_production():
+        problems = web_hardening.validate_production_config()
+        if problems:
+            raise SystemExit("Некорректная production-конфигурация: "
+                             + "; ".join(problems))
+    else:
+        # Never print the generated code: it is a secret, even for development.
         logging.getLogger(__name__).warning(
-            "ADMIN_CODE не задан — сгенерирован одноразовый код администратора: %s "
-            "(задайте ADMIN_CODE в .env, чтобы код был постоянным)", ADMIN_CODE)
-    app.run(host="0.0.0.0", port=port, debug=debug)
+            "ADMIN_CODE не задан: используется одноразовый код. "
+            "Задайте ADMIN_CODE в окружении для постоянного входа.")
+    app.run(host="0.0.0.0", port=port, debug=debug)  # nosec B104

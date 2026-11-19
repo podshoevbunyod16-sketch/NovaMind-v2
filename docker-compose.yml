@@ -1,0 +1,54 @@
+services:
+  app:
+    build: .
+    ports:
+      - "5000:5000"
+    environment:
+      APP_ENV: development
+      FLASK_DEBUG: "false"
+      PORT: "5000"
+      TERMINAL_ENABLED: "0"
+      COOKIE_SECURE: "0"
+      SESSION_SECRET: "${SESSION_SECRET:-dev-only-change-me-please-use-32-chars}"
+      ADMIN_CODE: "${ADMIN_CODE:-dev-only-admin-code-change-me}"
+      SEARCH_BACKENDS: "weather,searxng,ddg,wiki"
+    volumes:
+      - nova-data:/app/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:5000/healthz', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:16-alpine
+    profiles: ["infra"]
+    environment:
+      POSTGRES_DB: novamind
+      POSTGRES_USER: novamind
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in your environment}"
+    volumes:
+      - nova-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U novamind"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    profiles: ["infra"]
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - nova-redis:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  nova-data:
+  nova-postgres:
+  nova-redis:

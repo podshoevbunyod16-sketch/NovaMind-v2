@@ -1,12 +1,13 @@
-# YouTubegopro
-# 🧠 NovaMind - AI-Powered Web Assistant
+# 🧠 NovaMind-v2 — AI-powered web assistant
 
-![Python](https://img.shields.io/badge/Python-3.8+-blue)
+![Python](https://img.shields.io/badge/Python-3.11.5+-blue)
 ![Flask](https://img.shields.io/badge/Flask-2.0+-green)
 ![License](https://img.shields.io/badge/License-MIT-yellow)
 ![Status](https://img.shields.io/badge/Status-Development-orange)
 
 Умный веб-помощник на базе ИИ с возможностью генерации кода, изображений и управления файлами. Работает на локальном сервере с полной историей чата и кастомизацией команд.
+
+> **NovaMind-v2 — платформа вокруг подключаемых моделей, а не собственная foundation model.** Мы не заявляем паритет с Claude, GPT или Gemini: базовые модели и инфраструктура этих компаний несравнимо масштабнее. Цель — безопасный, наблюдаемый и расширяемый сервис с честной деградацией и подключаемыми провайдерами.
 
 ---
 
@@ -44,7 +45,7 @@
 
 ## 📋 Требования
 
-- **Python**: 3.8 или выше
+- **Python**: 3.11.5+ или 3.12 (для исправленной зависимости `soupsieve`)
 - **ОС**: Linux, macOS, Windows, Android (Termux)
 - **Браузер**: Chrome, Firefox, Safari, Edge
 - **Оперативная память**: 512 MB минимум
@@ -58,8 +59,8 @@
 
 ```bash
 # Клонирование репозитория
-git clone https://github.com/podshoevbunyod16-sketch/NovaMind.git
-cd NovaMind
+git clone https://github.com/podshoevbunyod16-sketch/NovaMind-v2.git
+cd NovaMind-v2
 
 # Создание виртуального окружения (рекомендуется)
 python3 -m venv venv
@@ -84,8 +85,8 @@ pkg update && pkg upgrade
 pkg install python git
 
 # Клонирование репозитория
-git clone https://github.com/podshoevbunyod16-sketch/NovaMind.git
-cd NovaMind
+git clone https://github.com/podshoevbunyod16-sketch/NovaMind-v2.git
+cd NovaMind-v2
 
 # Установка зависимостей
 pip install -r requirements.txt
@@ -414,10 +415,45 @@ chmod -R 755 uploads/ downloads/ generated_codes/ generated_images/
 ## 🔐 Безопасность
 
 ⚠️ **ВАЖНО:**
-- Никогда не коммитай `.env` файл с API ключами
-- Не делись ссылкой на localhost публично
-- Используй HTTPS в продакшене
-- Регулярно обновляй зависимости: `pip install --upgrade -r requirements.txt`
+- Никогда не коммить `.env`, `.session_secret`, `*.db`, `routes/uploads/` и пользовательские файлы.
+- Терминал и агентные команды **выключены по умолчанию**: `TERMINAL_ENABLED=1` только в изолированном окружении.
+- В production обязательны `APP_ENV=production`, `SESSION_SECRET`, сильный `ADMIN_CODE`, HTTPS и безопасные cookie.
+- Загрузки проверяются по размеру, расширению и magic bytes; лимит по умолчанию 25 МБ.
+- Все ответы проходят redaction секретов; скрытые рассуждения модели не показываются.
+- Регулярно обновляй зависимости: `pip install --upgrade -r requirements.txt`.
+
+Подробности: [SECURITY.md](SECURITY.md), [THREAT_MODEL.md](THREAT_MODEL.md), [DEPLOYMENT.md](DEPLOYMENT.md).
+
+## 🚀 Production и Docker
+
+```bash
+docker compose up --build                    # local development
+docker compose --profile infra up -d          # PostgreSQL + Redis (опционально)
+gunicorn -k gthread -w 2 --threads 4 -b 0.0.0.0:5000 app:app
+```
+
+Проверки: `curl /healthz`, `/readyz`, `/metrics`. Миграции и бэкапы: [DATABASE_MIGRATIONS.md](DATABASE_MIGRATIONS.md). Переменные окружения: [.env.example](.env.example), [API.md](API.md).
+
+## 🧪 Качество и проверки
+
+```bash
+python -m pytest -q tests --cov --cov-fail-under=70
+ruff check . && mypy
+bandit -q -ll $(git ls-files '*.py' | grep -vE '^(tests|examples|migrations)/')
+pip-audit -r requirements.txt
+python scripts/scan_secrets.py --history
+node tests/frontend/smoke.mjs http://127.0.0.1:5000
+```
+
+Оценки качества моделей: [AI_QUALITY.md](AI_QUALITY.md) и `evals/`. Итог проверок: [FINAL_AUDIT.md](FINAL_AUDIT.md).
+
+## 🆘 Troubleshooting
+
+- **503 на `/readyz`** — проверьте файл БД и права доступа; detailed message только в логах.
+- **429** — in-process rate limit; уменьшите частоту или настройте `RATE_*` и подключите Redis.
+- **403 CSRF** — запрос пришёл с чужого Origin; используйте токен из `/api/csrf-token` при `CSRF_REQUIRE_HEADER=1`.
+- **502 от AI** — провайдер недоступен или нет ключа; проверьте `/api/system/health`, включите fallback.
+- **417/413 upload** — файл больше лимита или не совпадает magic bytes с расширением.
 
 ---
 
@@ -439,7 +475,7 @@ MIT License - Используй свободно в личных и комме�
 ## 🤝 Поддержка
 
 Если нашёл баг или у тебя есть идея улучшения:
-1. Открой [Issue](https://github.com/podshoevbunyod16-sketch/NovaMind/issues)
+1. Открой [Issue](https://github.com/podshoevbunyod16-sketch/NovaMind-v2/issues)
 2. Опиши проблему детально
 3. Прикрепи скриншоты если нужно
 
@@ -450,11 +486,11 @@ MIT License - Используй свободно в личных и комме�
 - [Полная документация](./DOCUMENTATION.md)
 - [Flask документация](https://flask.palletsprojects.com/)
 - [Python документация](https://docs.python.org/3/)
-- [API документация](./docs/api.md)
+- [API документация](./API.md)
 
 ---
 
-**Последнее обновление:** май 2026  
-**Версия:** 1.0.0-beta
+**Последнее обновление:** ноябрь 2026
+**Версия:** 0.1.0 (production-hardening MVP)
 
 🌟 Если проект понравился, поставь звезду на GitHub!

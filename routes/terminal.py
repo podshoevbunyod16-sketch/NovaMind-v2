@@ -26,6 +26,7 @@ import threading
 import time
 import uuid
 
+import auth  # noqa: E402
 import identity  # noqa: E402
 
 terminal_bp = Blueprint("terminal", __name__)
@@ -172,7 +173,7 @@ def is_enabled():
 
 
 def is_admin():
-    return bool(session.get("admin_logged_in"))
+    return auth.is_admin()
 
 
 def signed_in():
@@ -182,7 +183,7 @@ def signed_in():
     синхронизируется через /api/session/login. Песочница — рабочее окружение,
     поэтому доступ есть у любого вошедшего, а не только у админа.
     """
-    return bool(session.get("admin_logged_in")
+    return bool(auth.is_admin()
                 or session.get("nova_google_login")
                 or session.get("nova_signed_in")
                 or session.get("nova_user_nick")
@@ -369,7 +370,7 @@ def check_command(command):
     try:
         tokens = _tokenize(command)
     except ValueError as exc:
-        raise ValueError(f"Не удалось разобрать команду: {exc}")
+        raise ValueError(f"Не удалось разобрать команду: {exc}") from exc
     if not tokens:
         raise ValueError("Пустая команда")
     # Одиночный «&» — фоновый запуск; не поддерживаем.
@@ -633,6 +634,73 @@ def _run_python_gateway(parts):
         return _result(1, "", f"novamind_cli: {type(exc).__name__}: {exc}")
 
 
+def _resource_limits():
+    """Return a ``preexec_fn`` applying hard resource caps to sandbox children.
+
+    This is defence in depth, not an OS sandbox: a container/separate UID is
+    still required for hostile code.  ``RLIMIT_NPROC`` is opt-in because on a
+    shared host it counts *all* processes of the server user.
+    """
+    if os.name != "posix":
+        return None
+    import resource
+
+    def apply():
+        try:
+            cpu = max(1, min(int(os.getenv("TERMINAL_CPU_SECONDS", "20")), 120))
+            memory_mb = max(64, min(int(os.getenv("TERMINAL_MEMORY_MB", "1024")), 4096))
+            file_mb = max(1, min(int(os.getenv("TERMINAL_MAX_FILE_MB", "64")), 512))
+            resource.setrlimit(resource.RLIMIT_CPU, (cpu, cpu))
+            resource.setrlimit(resource.RLIMIT_AS,
+                               (memory_mb * 1024 * 1024, memory_mb * 1024 * 1024))
+            resource.setrlimit(resource.RLIMIT_FSIZE,
+                               (file_mb * 1024 * 1024, file_mb * 1024 * 1024))
+            nproc = int(os.getenv("TERMINAL_RLIMIT_NPROC", "0"))
+            if nproc > 0:
+                resource.setrlimit(resource.RLIMIT_NPROC, (nproc, nproc))
+        except (ValueError, OSError):
+            # Never let a failed limit turn into an unexecutable command.
+            pass
+
+    return apply
+
+
+def _audit_command(command, result, duration_ms=0):
+    """One redacted, structured line per shell command (never the full output)."""
+    import logging
+
+    import observability
+
+    try:
+        from flask import has_request_context
+        rid = observability.request_id() if has_request_context() else "system"
+    except Exception:  # noqa: BLE001
+        rid = "system"
+    code = result.get("code") if isinstance(result, dict) else "exception"
+    logging.getLogger("novamind.audit").info(
+        "event=terminal_command request_id=%s code=%s ms=%s command=%s",
+        rid, code, duration_ms, observability.redact(str(command))[:300],
+    )
+
+
+def _audited(run):
+    """Wrap ``run_command`` so every call is audited, including early exits."""
+    import functools
+    import time as _time
+
+    @functools.wraps(run)
+    def wrapper(command, timeout=None, cancel=None):
+        started = _time.monotonic()
+        result = None
+        try:
+            result = run(command, timeout=timeout, cancel=cancel)
+            return result
+        finally:
+            _audit_command(command, result, int((_time.monotonic() - started) * 1000))
+
+    return wrapper
+
+
 def _sandbox_env():
     """Окружение песочницы: HOME указывает в workspace, git настроен."""
     return {
@@ -650,6 +718,7 @@ def _sandbox_env():
     }
 
 
+@_audited
 def run_command(command, timeout=None, cancel=None):
     """Выполняет команду в песочнице. Поддерживаются пайпы и «>»/«>>».
 
@@ -728,6 +797,7 @@ def run_command(command, timeout=None, cancel=None):
                     stderr=stderr,
                     env=env,
                     start_new_session=True,      # свой pgid — цепочку целиком снимаем
+                    preexec_fn=_resource_limits(),
                 )
             except FileNotFoundError:
                 kill_all()

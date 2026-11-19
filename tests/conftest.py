@@ -76,6 +76,7 @@ def isolated_env(tmp_path, monkeypatch):
     security.login_limiter.clear()
     security.agent_limiter.clear()
     security.tts_limiter.clear()
+    security.endpoint_limiter.clear()
 
     # Трассы и база знаний: у каждого теста свои файлы. Иначе «последние
     # трассы» и документы предыдущего теста попадали в следующий, и тесты
@@ -93,6 +94,7 @@ def isolated_env(tmp_path, monkeypatch):
     security.login_limiter.clear()
     security.agent_limiter.clear()
     security.tts_limiter.clear()
+    security.endpoint_limiter.clear()
 
     config.save_selected_media_model({})
     reset_speech_settings()

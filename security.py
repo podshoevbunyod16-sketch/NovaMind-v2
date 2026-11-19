@@ -134,9 +134,41 @@ class TTSRateLimiter(RateLimiter):
         return _env_int("TTS_RATE_WINDOW", 3600)
 
 
+class EndpointRateLimiter(RateLimiter):
+    """Coarse per-path limit for expensive endpoints (uploads/terminal/media)."""
+
+    RULES = (
+        ("/api/attachments", "UPLOAD", 20),
+        ("/upload_", "UPLOAD", 20),
+        ("/api/terminal", "TERMINAL", 60),
+        ("/api/media", "MEDIA", 30),
+        ("/api/agent", "AGENT", 120),
+        ("/api/", "API", 180),
+    )
+
+    def rule_for(self, path: str):
+        for prefix, name, default in self.RULES:
+            if path.startswith(prefix):
+                return prefix, name, _env_int(f"RATE_{name}", default)
+        return "", "", 0
+
+    def check(self, request):
+        """Returns (allowed, retry_after, limit, remaining, scope)."""
+        prefix, name, limit = self.rule_for(request.path)
+        if not name or limit <= 0 or os.getenv("ENDPOINT_RATE_LIMIT", "1") != "1":
+            return True, 0, 0, 0, ""
+        # Login has its own dedicated limiter; avoid double counting.
+        if request.path in {"/api/admin/login", "/api/session/login"}:
+            return True, 0, 0, 0, ""
+        scope = f"{name}:{client_ip(request)}:{prefix}"
+        allowed, retry_after, remaining = self.hit(scope, limit, self.window())
+        return allowed, retry_after, limit, remaining, scope
+
+
 login_limiter = LoginLimiter()
 agent_limiter = RateLimiter()
 tts_limiter = TTSRateLimiter()
+endpoint_limiter = EndpointRateLimiter()
 
 # Внутренние запуски агента (планировщик, Telegram-бот) идут в том же
 # процессе и не должны съедать лимит пользователя. Отличаем их секретным

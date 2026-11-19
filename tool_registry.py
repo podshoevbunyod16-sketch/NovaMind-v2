@@ -194,7 +194,7 @@ def native_tool_schemas(workspace: bool | None = None, only=None) -> list[dict]:
     """
     specs = {spec.name: spec for spec in list_tools()}
     tools = []
-    for action, (description, risk) in AGENT_ACTION_META.items():
+    for action, (description, _risk) in AGENT_ACTION_META.items():
         if only is not None and action not in only:
             continue
         if workspace is False and action in WORKSPACE_ACTIONS:
@@ -773,7 +773,8 @@ def _register_agent_tools():
             from flask import has_request_context, session
             import identity
             import scheduler
-            if not has_request_context() or not session.get("admin_logged_in"):
+            import auth
+            if not has_request_context() or not auth.is_admin():
                 return {"ok": False, "error": {"type": "unauthorized",
                     "message": "Создавать расписания может только администратор",
                     "retryable": False}}

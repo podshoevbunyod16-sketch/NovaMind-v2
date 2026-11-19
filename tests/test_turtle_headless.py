@@ -65,7 +65,7 @@ def test_headless_geometry_matches_square():
     headless_spin.draw_square(pen, 100)
     assert len(pen.segments) == 4
     for got, want in zip(pen.segments, [(0, 0, 100, 0), (100, 0, 100, -100),
-                                        (100, -100, 0, -100), (0, -100, 0, 0)]):
+                                        (100, -100, 0, -100), (0, -100, 0, 0)], strict=False):
         assert got == pytest.approx(want, abs=1e-9)
 
 

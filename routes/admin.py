@@ -9,6 +9,7 @@ import os
 import requests
 from urllib.parse import quote
 import config
+import auth
 import groq_rotation
 from groq_rotation import GROQ_KEYS, GROQ_KEY_COOLDOWN, get_groq_key_status
 from config import (ADMIN_CREDENTIALS, PROVIDERS, GOOGLE_CLIENT_ID,
@@ -141,8 +142,8 @@ def admin_login():
         return jsonify({'success': False, 'error': error})
 
     security.login_limiter.succeed(ip_key, user_key)
-    session['admin_logged_in'] = True
-    session['admin_username'] = username
+    auth.rotate_session()
+    auth.grant_admin(username=username)
     return jsonify({'success': True, 'username': username})
 
 @admin_bp.route('/api/session/login', methods=['POST'])
@@ -169,8 +170,7 @@ def session_login():
     allowed_nicks = _admin_nicks()
     if nick.lower() in allowed_nicks:
         if _is_local_loopback(request):
-            session['admin_logged_in'] = True
-            session['admin_username'] = nick
+            auth.grant_admin(username=nick)
             log.info("Локальный вход администратора по нику '%s' с %s", nick, request.remote_addr)
         else:
             log.warning(
@@ -181,7 +181,7 @@ def session_login():
     return jsonify({
         'success': True,
         'nick': nick,
-        'admin': bool(session.get('admin_logged_in')),
+        'admin': auth.is_admin(),
     })
 
 
@@ -189,11 +189,11 @@ def session_login():
 def session_check():
     """Кто вошёл — интерфейсу нужно знать, открывать ли рабочую папку."""
     return jsonify({
-        'signed_in': bool(session.get('admin_logged_in') or session.get('nova_google_login')
+        'signed_in': bool(auth.is_admin() or session.get('nova_google_login')
                           or session.get('nova_signed_in') or session.get('nova_user_nick')
                           or session.get('username')),
         'nick': session.get('admin_username') or session.get('nova_user_nick') or '',
-        'admin': bool(session.get('admin_logged_in')),
+        'admin': auth.is_admin(),
     })
 
 
@@ -209,9 +209,27 @@ def admin_logout():
     session.clear()
     return jsonify({'success': True})
 
+
+@admin_bp.post('/api/session/rotate')
+def session_rotate():
+    """Rotate the session version; keep chat ownership stable."""
+    auth.rotate_session()
+    return jsonify({'success': True})
+
+
+@admin_bp.post('/api/admin/sessions/logout-all')
+def admin_logout_everywhere():
+    """Revoke administrator access in all browsers at once."""
+    if not auth.is_admin():
+        return jsonify({'success': False, 'error': 'forbidden'}), 403
+    auth.logout_everywhere()
+    auth.revoke_admin()
+    return jsonify({'success': True, 'sessions_revoked': True})
+
+
 @admin_bp.route('/api/admin/check')
 def admin_check():
-    if session.get('admin_logged_in'):
+    if auth.is_admin():
         return jsonify({'logged_in': True, 'username': session.get('admin_username', 'admin')})
     return jsonify({'logged_in': False})
 

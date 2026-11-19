@@ -28,7 +28,7 @@ def generate_image_pollinations(prompt, width=1024, height=1024):
     
     # Делаем GET запрос для получения картинки
     # Важно: stream=True, чтобы не грузить всё в память сразу, если изображение большое
-    response = requests.get(url, stream=True)
+    response = requests.get(url, stream=True, timeout=60)
     
     if response.status_code == 200:
         # Вместо сохранения на диск, возвращаем готовый URL
@@ -61,7 +61,7 @@ def generate_image_huggingface(prompt, token, width=1024, height=1024):
     }
     
     try:
-        response = requests.post(HF_API_URL, headers=headers, json=payload)
+        response = requests.post(HF_API_URL, headers=headers, json=payload, timeout=60)
         
         if response.status_code == 200:
             # Конвертируем бинарные данные изображения в base64 для вставки в JSON ответ

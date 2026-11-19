@@ -23,7 +23,7 @@ class ImageTurn:
     source: str = ""
 
 
-_current = contextvars.ContextVar("react_images", default=ImageTurn(""))
+_current = contextvars.ContextVar("react_images", default=ImageTurn(""))  # noqa: B039 — immutable in practice
 current = _current.get
 
 

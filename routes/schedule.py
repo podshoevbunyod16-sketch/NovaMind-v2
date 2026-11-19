@@ -24,7 +24,8 @@ def owner_key():
 
 
 def is_admin():
-    return bool(session.get("admin_logged_in"))
+    import auth
+    return auth.is_admin()
 
 
 @schedule_bp.route("/api/schedule", methods=["GET"])

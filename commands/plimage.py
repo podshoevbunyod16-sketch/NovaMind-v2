@@ -13,7 +13,7 @@ def run(args):
 
     try:
         # Скачиваем изображение в память
-        resp = requests.get(url)
+        resp = requests.get(url, timeout=60)
         resp.raise_for_status()
 
         # Отправляем изображение прямо в чат без сохранения
@@ -25,7 +25,8 @@ def run(args):
             data={
                 "prompt": prompt,
                 "message": f"Сгенерировано изображение по запросу: {prompt}"
-            }
+            },
+            timeout=60,
         )
         
         if chat_response.status_code == 200:

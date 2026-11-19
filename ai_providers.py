@@ -1178,7 +1178,7 @@ def _raw_stream(provider, model, payload, cfg, timeout):
         attempts = 1
 
     last_error = None
-    for attempt in range(attempts):
+    for _attempt in range(attempts):
         if provider == "groq":
             current_key = get_groq_key()
             if not current_key:

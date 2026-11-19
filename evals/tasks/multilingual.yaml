@@ -1,0 +1,24 @@
+# Язык ответа соответствует языку вопроса (RU/EN).
+id: lang-ru-01
+category: multilingual
+prompt: Объясни двумя предложениями, чем отличается HTTP от HTTPS.
+expect: HTTPS
+max_steps: 3
+---
+id: lang-en-01
+category: multilingual
+prompt: Explain in two sentences why HTTPS is preferable to HTTP.
+expect: HTTPS
+max_steps: 3
+---
+id: lang-ru-02
+category: multilingual
+prompt: Напиши короткий чек-лист из трёх пунктов по проверке качества ответа с источниками.
+expect: источник
+max_steps: 3
+---
+id: lang-en-02
+category: multilingual
+prompt: Give a three-item checklist for verifying an answer that cites web sources.
+expect: source
+max_steps: 3

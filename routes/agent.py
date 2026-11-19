@@ -16,6 +16,7 @@ routes/agent.py — совместимые Flask-маршруты для фун�
 завершённой без подтверждающего результата.
 """
 from flask import Blueprint, Response, request, jsonify, session, stream_with_context
+import auth
 import json
 import logging
 import os
@@ -921,7 +922,7 @@ def active_run(run_id):
 def agent_status():
     enabled = is_enabled()
     mcp_tool_count = 0
-    mcp_access = bool(session.get("admin_logged_in")) or os.getenv("MCP_ALLOW_USER_READ", "0") == "1"
+    mcp_access = bool(auth.is_admin()) or os.getenv("MCP_ALLOW_USER_READ", "0") == "1"
     if mcp_access:
         try:
             import mcp_manager
@@ -942,7 +943,7 @@ def agent_status():
         "timeout": AGENT_TIMEOUT,
         "confirm_mode": policy.confirm_mode(),
         "user": signed_in(),
-        "admin": bool(session.get("admin_logged_in")),
+        "admin": auth.is_admin(),
         "hint": ("" if enabled
                  else "Включите AGENT_ENABLED=1 в .env и перезапустите сервер"),
         "workspace_hint": ("" if workspace else
