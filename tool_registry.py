@@ -328,8 +328,19 @@ def bootstrap_default_tools():
             permissions=("network",), timeout=15))
     if get_tool("knowledge_search") is None:
         def _knowledge_search(query, limit=5, owner=""):
+            # Never trust an owner supplied by the model/terminal payload.
+            # The scope comes from the server-side identity context only.
+            import identity
             import knowledge
-            return knowledge.search_tool(str(query), limit=int(limit or 5), owner=owner)
+            resolved_owner = str(identity.chat_owner() or "").strip()
+            if not resolved_owner:
+                return {"ok": False, "error": {
+                    "type": "permission_denied",
+                    "message": "Для поиска нужна проверенная identity владельца",
+                    "retryable": False}}
+            is_admin = bool(identity.is_admin_owner(resolved_owner))
+            return knowledge.search_tool(str(query), limit=int(limit or 5),
+                                         owner=resolved_owner, any_owner=is_admin)
 
         register_tool(ToolSpec(
             "knowledge_search",

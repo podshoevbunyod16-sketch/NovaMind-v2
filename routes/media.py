@@ -1,22 +1,106 @@
 """
 routes/media.py — Загрузка файлов, изображений, TTS, STT, видео
 """
-from flask import Blueprint, request, jsonify, send_from_directory, send_file, session
+import base64
+import mimetypes
 import os
 import shutil
 import tempfile
 import uuid
-import mimetypes
-import base64
-import zipfile
 import xml.etree.ElementTree as ET
+import zipfile
+
 import requests
-from ai_providers import chat_completion
-from groq_rotation import get_groq_key, GROQ_KEYS
+from flask import Blueprint, jsonify, request, send_file
+from werkzeug.utils import secure_filename
+
 import config
 import media_generation as mg
+from ai_providers import chat_completion
+from groq_rotation import GROQ_KEYS, get_groq_key
 
 media_bp = Blueprint("media", __name__)
+
+ANALYZE_MAX_BYTES = 25 * 1024 * 1024
+MEDIA_UPLOAD_MAX_BYTES = 100 * 1024 * 1024
+TTS_MAX_CHARS = 12000
+def _owner():
+    try:
+        import identity
+        return identity.chat_owner()
+    except Exception:  # noqa: BLE001 - missing owner context must fail closed
+        return ""
+
+
+def _safe_filename(filename):
+    raw = str(filename or "")
+    if not raw or "\x00" in raw or raw != os.path.basename(raw):
+        return None
+    safe = secure_filename(raw)
+    if not safe or safe != raw or safe in {".", ".."} or len(safe) > 180:
+        return None
+    return safe
+
+
+def _read_upload(uploaded, limit):
+    if uploaded.content_length and uploaded.content_length > limit:
+        raise ValueError("too_large")
+    chunks, total = [], 0
+    while True:
+        chunk = uploaded.stream.read(min(1024 * 1024, limit - total + 1))
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > limit:
+            raise ValueError("too_large")
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+def _signature_matches(data, content_type):
+    if content_type in {"image/svg+xml", "application/svg+xml"} or b"<svg" in data[:4096].lower():
+        return False
+    signatures = {
+        "image/png": data.startswith(b"\x89PNG\r\n\x1a\n"),
+        "image/jpeg": data.startswith(b"\xff\xd8\xff"),
+        "image/gif": data.startswith((b"GIF87a", b"GIF89a")),
+        "image/webp": data.startswith(b"RIFF") and data[8:12] == b"WEBP",
+        "audio/wav": data.startswith(b"RIFF") and data[8:12] == b"WAVE",
+        "audio/x-wav": data.startswith(b"RIFF") and data[8:12] == b"WAVE",
+        "audio/mpeg": data.startswith((b"ID3", b"\xff\xfb", b"\xff\xf3", b"\xff\xf2")),
+        "audio/mp3": data.startswith((b"ID3", b"\xff\xfb", b"\xff\xf3", b"\xff\xf2")),
+        "audio/ogg": data.startswith(b"OggS"),
+        "audio/opus": data.startswith(b"OggS"),
+        "video/mp4": len(data) >= 12 and data[4:8] == b"ftyp",
+        "video/quicktime": len(data) >= 12 and data[4:8] == b"ftyp",
+        "video/webm": data.startswith(b"\x1a\x45\xdf\xa3"),
+    }
+    return signatures.get(content_type, False)
+
+
+def _remember_owner(filename, storage="media"):
+    owner = _owner()
+    if not owner:
+        return False
+    try:
+        import database
+        if not database.remember_media_owner(filename, owner=owner, storage=storage):
+            return False
+    except Exception:  # noqa: BLE001 - owner registration failures must fail closed
+        return False
+    return True
+
+
+def _owns_file(filename, storage="media"):
+    owner = _owner()
+    if not owner:
+        return False
+    try:
+        import database
+        return database.media_file_allowed(filename, owner=owner, storage=storage)
+    except Exception:  # noqa: BLE001 - durable ownership is authoritative
+        # Durable ownership is authoritative; a DB failure must fail closed.
+        return False
 
 # ========== ОТДАЧА ИЗОБРАЖЕНИЙ ==========
 
@@ -25,7 +109,9 @@ def generated_image():
     filename = request.args.get("file", "")
     if not filename:
         return jsonify({"error": "No filename"}), 400
-    safe_name = os.path.basename(filename.replace("..", ""))
+    safe_name = _safe_filename(filename)
+    if not safe_name or not _owns_file(safe_name, storage="images"):
+        return jsonify({"error": "Файл не найден"}), 404
     img_dir = mg.IMAGE_DIR
     filepath = os.path.join(img_dir, safe_name)
     if not os.path.exists(filepath):
@@ -51,9 +137,13 @@ def analyze_attachment():
     if not uploaded or not uploaded.filename:
         return jsonify({'error': 'Файл не выбран'}), 400
 
-    filename = os.path.basename(uploaded.filename)
+    filename = _safe_filename(uploaded.filename)
+    if not filename:
+        return jsonify({'error': 'Небезопасное имя файла'}), 400
     ext = os.path.splitext(filename)[1].lower()
-    content_type = uploaded.mimetype or mimetypes.guess_type(filename)[0] or 'application/octet-stream'
+    content_type = (uploaded.mimetype or mimetypes.guess_type(filename)[0] or 'application/octet-stream').split(';')[0].lower()
+    if content_type in {'image/svg+xml', 'application/svg+xml'}:
+        return jsonify({'error': 'SVG и активное содержимое запрещены'}), 415
     user_desc = (request.form.get('description') or '').strip()
 
     # Файл нужен только на время анализа: складываем его во временную папку
@@ -61,10 +151,19 @@ def analyze_attachment():
     # никто их не обслуживал.
     upload_dir = tempfile.mkdtemp(prefix="novamind-upload-")
     filepath = os.path.join(upload_dir, f"{uuid.uuid4().hex}_{filename}")
-    uploaded.save(filepath)
 
     try:
-        if os.path.getsize(filepath) > 25 * 1024 * 1024:
+        try:
+            blob = _read_upload(uploaded, ANALYZE_MAX_BYTES)
+        except ValueError:
+            return jsonify({'error': 'Файл слишком большой. Максимальный размер анализа — 25 МБ.'}), 413
+        if b'<svg' in blob[:4096].lower():
+            return jsonify({'error': 'SVG и активное содержимое запрещены'}), 415
+        with open(filepath, 'wb') as handle:
+            handle.write(blob)
+        if content_type.startswith('image/') and not _signature_matches(blob, content_type):
+            return jsonify({'error': 'Сигнатура файла не соответствует Content-Type'}), 415
+        if os.path.getsize(filepath) > ANALYZE_MAX_BYTES:
             return jsonify({'error': 'Файл слишком большой. Максимальный размер анализа — 25 МБ.'}), 413
 
         is_image = content_type.startswith('image/') or ext in {'.jpg','.jpeg','.png','.webp','.gif','.bmp'}
@@ -92,7 +191,7 @@ def analyze_attachment():
             'type': content_type,
             'result': f'📁 **Анализ файла {filename}:**\n\n{reply}'
         })
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - parser/provider boundary returns a safe API error
         print(f"[attachments] error: {exc}")
         return jsonify({'error': f'Ошибка обработки файла: {exc}'}), 500
     finally:
@@ -297,7 +396,9 @@ mg.ensure_media_dir()
 
 @media_bp.route('/media/<path:filename>')
 def media_file(filename):
-    safe_name = os.path.basename(filename)
+    safe_name = _safe_filename(filename)
+    if not safe_name or not _owns_file(safe_name):
+        return jsonify({"error": "Медиафайл не найден"}), 404
     filepath = os.path.join(MEDIA_DIR, safe_name)
     if not os.path.isfile(filepath):
         return jsonify({"error": "Медиафайл не найден"}), 404
@@ -314,12 +415,25 @@ def media_upload():
     media = request.files.get('file')
     if not media or not media.filename:
         return jsonify({"error": "Файл не выбран"}), 400
-    content_type = media.mimetype or mimetypes.guess_type(media.filename)[0] or "application/octet-stream"
-    if not (content_type.startswith("audio/") or content_type.startswith("video/") or content_type.startswith("image/")):
-        return jsonify({"error": "Поддерживаются только аудио, видео и изображения"}), 415
+    if not _safe_filename(media.filename):
+        return jsonify({"error": "Небезопасное имя файла"}), 400
+    content_type = (media.mimetype or mimetypes.guess_type(media.filename)[0] or "application/octet-stream").split(';')[0].lower()
+    if content_type == "image/svg+xml" or not (content_type.startswith("audio/") or content_type.startswith("video/") or content_type.startswith("image/")):
+        return jsonify({"error": "Поддерживаются только безопасные аудио, видео и изображения"}), 415
+    try:
+        blob = _read_upload(media, MEDIA_UPLOAD_MAX_BYTES)
+    except ValueError:
+        return jsonify({"error": "Файл слишком большой"}), 413
+    if not _signature_matches(blob, content_type):
+        return jsonify({"error": "Сигнатура файла не соответствует Content-Type"}), 415
     extension = os.path.splitext(media.filename)[1].lower() or mimetypes.guess_extension(content_type) or ""
     saved_name = f"upload_{uuid.uuid4().hex}{extension}"
-    media.save(os.path.join(MEDIA_DIR, saved_name))
+    mg.ensure_media_dir()
+    with open(os.path.join(MEDIA_DIR, saved_name), 'wb') as handle:
+        handle.write(blob)
+    if not _remember_owner(saved_name):
+        os.remove(os.path.join(MEDIA_DIR, saved_name))
+        return jsonify({"error": "Не удалось зарегистрировать владельца файла"}), 503
     return jsonify({"success": True, "filename": media.filename, "type": content_type, "url": f"/media/{saved_name}"})
 
 @media_bp.route('/api/media/transcribe', methods=['POST'])
@@ -507,6 +621,10 @@ def media_generate():
     if error:
         return jsonify({"error": error, "status": "error", "events": events,
                         "model": mg.selection_payload(model)}), 502
+    if result.get("filename") and not _remember_owner(result["filename"]):
+        mg.discard_media_file(result)
+        return jsonify({"error": "Не удалось зарегистрировать владельца медиафайла",
+                        "status": "error"}), 503
     return jsonify({
         "status": "queued" if result.get("job_id") else "done",
         "media": result,
@@ -519,9 +637,25 @@ def media_generate():
 @media_bp.route('/api/media/jobs/<path:job_id>', methods=['GET'])
 def media_job(job_id):
     """Реальный статус асинхронной задачи у провайдера (без выдуманного прогресса)."""
+    record = mg.get_job(job_id)
+    if record is None:
+        return jsonify({"error": "Задача не найдена"}), 404
+    record_owner = str(record.get("owner") or "")
+    current_owner = str(_owner() or "")
+    if not record_owner or not current_owner or record_owner != current_owner:
+        return jsonify({"error": "Задача не найдена"}), 404
     record = mg.poll_job(job_id)
     if record is None:
         return jsonify({"error": "Задача не найдена"}), 404
+    media = record.get("media") or {}
+    media_url = str(media.get("url") or "")
+    is_local_output = bool(media.get("path") or media_url.startswith("/media/"))
+    if (record.get("state") in {"succeeded", "completed", "success"}
+            and is_local_output and media.get("filename") and not record.get("owner_registered")):
+        if not _remember_owner(media["filename"]):
+            mg.fail_job(job_id, "Не удалось зарегистрировать владельца медиафайла", discard_output=True)
+            return jsonify({"error": "Не удалось зарегистрировать владельца медиафайла"}), 503
+        mg.mark_job_owner_registered(job_id)
     return jsonify(mg.job_public(record))
 
 
@@ -535,6 +669,9 @@ def _legacy_generate(default_backend_model: dict, prompt: str, options: dict):
     )
     if error:
         return jsonify({"error": error}), 502
+    if result.get("filename") and not _remember_owner(result["filename"]):
+        mg.discard_media_file(result)
+        return jsonify({"error": "Не удалось зарегистрировать владельца медиафайла"}), 503
     return jsonify({"success": True, "url": result.get("url"), "provider": result.get("provider"),
                     "media": result})
 
@@ -556,6 +693,8 @@ def media_tts():
     text = (data.get("text") or "").strip()
     if not text:
         return jsonify({"error": "Введите текст для озвучивания"}), 400
+    if len(text) > TTS_MAX_CHARS:
+        return jsonify({"error": f"Текст превышает лимит {TTS_MAX_CHARS} символов"}), 413
     endpoint = os.getenv("AUDIO_TTS_URL", "")
     model_id = data.get("model") or os.getenv("AUDIO_TTS_MODEL") or "gemini-3.8-flash-lite-tts"
     if endpoint:
@@ -614,4 +753,3 @@ def media_video():
     return _legacy_generate(model, prompt, options)
 
 # ========== МОДЕЛИ ==========
-

@@ -2,9 +2,26 @@
 
 from __future__ import annotations
 
+import ipaddress
+
+import pytest
+
 import mcp_registry
 import routes.agent as agent_routes
 from tests.agent_helpers import answer_of, events_of, model_text, ndjson, script
+
+
+@pytest.fixture(autouse=True)
+def mocked_github_dns(monkeypatch):
+    import routes.search as search_routes
+    resolve = search_routes._resolved_public_addresses
+
+    def resolve_test_host(hostname):
+        if str(hostname).lower() in {"github.com", "www.github.com", "api.github.com"}:
+            return {ipaddress.ip_address("93.184.216.34")}
+        return resolve(hostname)
+
+    monkeypatch.setattr(search_routes, "_resolved_public_addresses", resolve_test_host)
 
 
 class _FakeHttpxResp:

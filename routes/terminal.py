@@ -15,7 +15,6 @@ routes/terminal.py — маленькое Linux-окружение для чат
   4. cwd всегда внутри workspace, пути не выходят за его пределы;
   5. таймаут на команду, обрезанный вывод, лимит параллельных запусков.
 """
-from flask import Blueprint, request, jsonify, session
 import os
 import re
 import shlex
@@ -24,9 +23,10 @@ import subprocess
 import sys
 import threading
 import time
-import uuid
 
-import identity  # noqa: E402
+from flask import Blueprint, jsonify, request, session
+
+import identity
 
 terminal_bp = Blueprint("terminal", __name__)
 
@@ -48,6 +48,12 @@ def _ws():
 COMMAND_TIMEOUT = float(os.getenv("TERMINAL_TIMEOUT", "20"))
 MAX_OUTPUT = int(os.getenv("TERMINAL_MAX_OUTPUT", "12000"))
 MAX_CONCURRENT = 2
+MAX_COMMAND_TIMEOUT = 45.0
+MAX_SLOW_COMMAND_TIMEOUT = 120.0
+# This process is not an OS/container sandbox.  Host execution is therefore
+# opt-in; the default still permits the existing local, read-only inspection
+# commands and the in-process registered-tool gateway.
+HOST_EXECUTION_ENV = "TERMINAL_HOST_EXECUTION"
 
 # Команды, которые можно выполнять. Всё остальное — отказ с подсказкой.
 ALLOWED_COMMANDS = {
@@ -77,6 +83,20 @@ ALLOWED_COMMANDS = {
     "pkg", "apt", "apt-get", "dpkg",
     "nova",                 # встроенная команда окружения: поиск и чтение страниц
 }
+
+_NETWORK_COMMANDS = {"curl", "wget", "ping", "ssh", "scp", "sftp", "dig", "nslookup",
+                     "host", "nc", "netcat", "ip", "ifconfig", "ss", "yt-dlp"}
+_READ_ONLY_COMMANDS = {
+    "ls", "pwd", "cat", "head", "tail", "less", "more", "wc", "grep", "egrep", "fgrep",
+    "find", "fd", "tree", "stat", "file", "du", "df", "diff", "sort", "uniq", "cut",
+    "awk", "sed", "tr", "nl", "basename", "dirname", "realpath", "which", "type", "echo",
+    "printf", "date", "whoami", "id", "uname", "hostname", "uptime", "ps", "seq", "true",
+    "false", "man", "help", "history", "clear", "md5sum", "sha1sum", "sha256sum", "base64",
+    "iconv", "rev", "tac", "paste", "column", "fmt", "fold", "expand", "unexpand", "jq",
+}
+_ARBITRARY_INTERPRETERS = {"python", "python3", "node", "npm", "npx", "deno", "bun", "perl",
+                            "ruby", "php", "lua", "java", "javac", "go", "rustc", "cargo",
+                            "gcc", "g++", "make", "pip", "pip3", "pytest", "tsc"}
 # Подстроки, которые запрещены даже внутри разрешённой команды:
 # склейка команд, sudo, подстановки в оболочку, фоновый запуск.
 # Пайпы «|» и перенаправления «>» «>>» «2>» «&>» разбираются отдельно.
@@ -103,6 +123,17 @@ def _server_python_enabled() -> bool:
         "0", "false", "off", "no")
 
 
+def _host_execution_enabled() -> bool:
+    return (os.getenv(HOST_EXECUTION_ENV, "0") or "").strip().lower() in (
+        "1", "true", "yes", "on")
+
+
+def _command_is_read_only(prepared, redirects) -> bool:
+    """Whether a command can use the non-sandboxed host fallback."""
+    return not redirects and all(program in _READ_ONLY_COMMANDS
+                                 for _argv, program in prepared)
+
+
 def _with_server_interpreter(argv):
     """`python3`/`pip`/`pytest` из песочницы → интерпретатор сервера.
 
@@ -119,6 +150,12 @@ def _with_server_interpreter(argv):
         return [sys.executable, *rest]
     module = "pip" if program.startswith("pip") else program   # pytest
     return [sys.executable, "-m", module, *rest]
+
+
+def _with_resource_limits(argv):
+    """Run commands through a helper process instead of thread-unsafe preexec_fn."""
+    wrapper = os.path.join(os.path.dirname(__file__), "terminal_resource_wrapper.py")
+    return [sys.executable, wrapper, *argv]
 
 
 _run_lock = threading.Semaphore(MAX_CONCURRENT)
@@ -347,7 +384,7 @@ def _tokenize(command):
     return merged
 
 
-def check_command(command):
+def check_command(command, *, enforce_host_execution=True):
     """Проверяет команду: пустая, запрещённая конструкция или не из списка.
 
     Поддерживает пайпы и перенаправления: «ls -la | grep -v txt | wc -l»,
@@ -416,8 +453,19 @@ def check_command(command):
         program = os.path.basename(segment[0])
         if program not in ALLOWED_COMMANDS:
             raise ValueError(f"Команда «{program}» не в списке разрешённых")
+        if program in _NETWORK_COMMANDS:
+            raise ValueError("Сетевые команды отключены: используйте зарегистрированный инструмент")
         prepared.append((segment, program))
     _validate_command_paths(prepared)
+    in_process_python = (
+        len(prepared) == 1 and prepared[0][1] in {"python", "python3"}
+        and _python_command(prepared[0][0]) is not None
+    )
+    if (enforce_host_execution and not _host_execution_enabled()
+            and not _command_is_read_only(prepared, redirects) and not in_process_python):
+        # The in-process gateway is handled before subprocess execution.
+        raise ValueError("Небезопасный host fallback отключён по умолчанию; "
+                         "включите TERMINAL_HOST_EXECUTION=1 только с OS/container sandbox")
     return prepared, redirects
 
 
@@ -467,7 +515,7 @@ def _format_results(query, results, backend=None, elapsed=0):
 
 def nova_search(query, limit=8):
     """Поиск в интернете из песочницы — те же бэкенды, что и в чате."""
-    from routes.search import search_web          # ленивый импорт: не тянет requests зря
+    from routes.search import search_web  # ленивый импорт: не тянет requests зря
     started = time.time()
     results, trace = search_web(query, num=limit)
     backend = next((entry["backend"] for entry in trace if entry.get("ok")), None)
@@ -518,8 +566,8 @@ def _run_nova(parts, timeout):
         argv = ["nova", verb] + argv[3:]
     elif verb == "mcp" and sub == "tools":
         try:
-            import mcp_registry
             import mcp_manager
+            import mcp_registry
             catalog = mcp_registry.format_tools_summary(
                 mcp_manager.discover_tools(), max_tools=40)
         except Exception as error:  # noqa: BLE001 — каталог необязателен
@@ -599,6 +647,7 @@ def _run_python_gateway(parts):
     process-shaped result: exit code, stdout and stderr.
     """
     import json
+
     import tool_registry
 
     try:
@@ -721,7 +770,7 @@ def run_command(command, timeout=None, cancel=None):
             stderr = stderr_handle if (index == last and stderr_handle) else subprocess.PIPE
             try:
                 proc = subprocess.Popen(
-                    segment,
+                    _with_resource_limits(segment),
                     cwd=_ws(),
                     stdin=stdin,
                     stdout=stdout,
@@ -824,14 +873,19 @@ def _agent_server_guard(command):
 def _agent_timeout(command, requested):
     """Give explicit package/bootstrap operations more room, with a hard ceiling."""
     try:
+        requested_value = float(requested) if requested is not None else 12.0
+    except (TypeError, ValueError):
+        requested_value = 12.0
+    try:
         prepared, _redirects = check_command(command)
     except ValueError:
-        return max(0.1, min(float(requested or 12), 120.0))
+        return max(0.1, min(requested_value, MAX_COMMAND_TIMEOUT))
     words = [part.lower() for argv, _program in prepared for part in argv]
     slow = ((words and words[0] in {"pip", "pip3"} and "install" in words)
             or ("-m" in words and "venv" in words))
-    cap = 120.0 if slow else 45.0
-    return max(float(requested or 12), min(cap, 120.0))
+    if slow:
+        return max(60.0, min(requested_value, MAX_SLOW_COMMAND_TIMEOUT))
+    return max(0.1, min(requested_value, MAX_COMMAND_TIMEOUT))
 
 
 def run_agent(command, timeout=12, cancel=None):
@@ -844,6 +898,16 @@ def run_agent(command, timeout=12, cancel=None):
     except (ValueError, RuntimeError) as exc:
         return {"code": 2, "stdout": "", "stderr": str(exc), "duration_ms": 0,
                 "timed_out": False, "cancelled": False}
+
+
+def _direct_policy_denial(tool, payload):
+    """Direct HTTP calls cannot display/resolve an agent confirmation card."""
+    from agent import policy
+    if not policy.needs_confirmation(tool, payload):
+        return None
+    return jsonify({"error": "Требуется подтверждение действия через agent policy",
+                    "tool": tool, "risk": policy.risk_of(tool, payload),
+                    "confirmation_required": True}), 403
 
 
 # ───────────────────────── маршруты ─────────────────────────
@@ -871,6 +935,8 @@ def terminal_status():
 def terminal_bootstrap():
     """Создаёт песочницу заново (не трогая существующие файлы)."""
     if (blocked := guard()):
+        return blocked
+    if (blocked := _direct_policy_denial("file_edit", "bootstrap workspace")):
         return blocked
     return jsonify({"created": ensure_workspace(), "workspace": relative_to_workspace(_ws())})
 
@@ -927,6 +993,8 @@ def terminal_file():
             return jsonify({"path": relative_to_workspace(target), "content": handle.read()[:60000]})
 
     if action == "write":
+        if (blocked := _direct_policy_denial("file_edit", str(data))):
+            return blocked
         content = str(data.get("content") or "")
         if len(content) > 200_000:
             return jsonify({"error": "Слишком большой файл"}), 400
@@ -973,6 +1041,17 @@ def _terminal_run(data):
         return jsonify({"error": "Введите команду"}), 400
     if any(token in str(command) for token in ("&&", "||", "`", "$(", "${")):
         return jsonify({"error": "Составные конструкции &&/||/`/$( отключены", "command": command}), 400
+    try:
+        check_command(command, enforce_host_execution=False)
+    except ValueError as exc:
+        message = str(exc)
+        if "не в списке разрешённых" in message or "Сетевые команды отключены" in message:
+            return jsonify({"error": message, "command": command}), 400
+        if "invalid JSON" in message or "JSON-объектом" in message:
+            return jsonify({**_result(2, "", message), "command": command,
+                            "cwd": relative_to_workspace(_ws())})
+    if (blocked := _direct_policy_denial("bash", command)):
+        return blocked
     try:
         result = run_command(command, timeout=data.get("timeout"))
     except ValueError as exc:
@@ -1062,6 +1141,8 @@ def linux_save():
     if (blocked := guard()):
         return blocked
     data = request.get_json(silent=True) or {}
+    if (blocked := _direct_policy_denial("file_edit", str(data))):
+        return blocked
     query = (data.get("query") or "Заметка").strip()
     results = data.get("results") if isinstance(data.get("results"), list) else []
 

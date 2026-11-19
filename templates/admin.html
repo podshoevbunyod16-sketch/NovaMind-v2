@@ -301,7 +301,7 @@
         <h1>⚙️ Админ-панель</h1>
         <div class="header-actions">
             <a href="/" class="btn">🏠 Главная</a>
-            <button class="btn danger" onclick="logout()">🚪 Выйти</button>
+            <button id="logoutButton" class="btn danger" type="button">🚪 Выйти</button>
         </div>
     </div>
 
@@ -310,7 +310,7 @@
         <h2>🔐 Вход в админ-панель</h2>
         <input type="text" id="username" placeholder="Логин">
         <input type="password" id="password" placeholder="Код">
-        <button class="btn accent" style="width:100%;" onclick="login()">Войти</button>
+        <button id="loginButton" class="btn accent" type="button" style="width:100%;">Войти</button>
         <p id="loginError" style="color:var(--error-text);margin-top:10px;font-size:0.85rem;"></p>
     </div>
 
@@ -328,7 +328,7 @@
                 <h3>⚙️ Настройки</h3>
                 <label>Системный промпт</label>
                 <textarea id="systemPrompt" rows="3"></textarea>
-                <button class="btn accent" onclick="saveSettings()">💾 Сохранить</button>
+                <button id="saveSettingsButton" class="btn accent" type="button">💾 Сохранить</button>
             </div>
 
             <!-- Редактор кода -->
@@ -340,9 +340,9 @@
                 <textarea id="codeEditor" placeholder="# Введите ваш код здесь...
 print('Привет из админ-панели!')" rows="8"></textarea>
                 <div style="display:flex;gap:8px;flex-wrap:wrap;">
-                    <button class="btn accent" onclick="saveAndRunCode()">💾 Сохранить и запустить</button>
-                    <button class="btn" onclick="saveCode()">💾 Только сохранить</button>
-                    <button class="btn" onclick="runSavedCode()">▶ Запустить сохранённый</button>
+                    <button id="saveAndRunButton" class="btn accent" type="button">💾 Сохранить и запустить</button>
+                    <button id="saveCodeButton" class="btn" type="button">💾 Только сохранить</button>
+                    <button id="runSavedCodeButton" class="btn" type="button">▶ Запустить сохранённый</button>
                 </div>
                 <div class="output-box" id="codeOutput">Здесь появится результат выполнения...</div>
             </div>
@@ -357,6 +357,7 @@ print('Привет из админ-панели!')" rows="8"></textarea>
 
     <div class="toast" id="toast"></div>
 
+    <script src="/static/csrf.js"></script>
     <script>
         const loginScreen = document.getElementById('loginScreen');
         const dashboard = document.getElementById('dashboard');
@@ -423,12 +424,19 @@ print('Привет из админ-панели!')" rows="8"></textarea>
                 const data = await resp.json();
                 
                 // Статистика
-                document.getElementById('statsGrid').innerHTML = `
-                    <div class="stat-item"><div class="stat-value">${data.history_messages || 0}</div><div class="stat-label">Сообщений в истории</div></div>
-                    <div class="stat-item"><div class="stat-value">${data.plugins_loaded?.length || 0}</div><div class="stat-label">Плагинов</div></div>
-                    <div class="stat-item"><div class="stat-value">${data.custom_commands?.length || 0}</div><div class="stat-label">Своих команд</div></div>
-                    <div class="stat-item"><div class="stat-value">${data.voice_enabled ? 'Да' : 'Нет'}</div><div class="stat-label">Озвучка</div></div>
-                `;
+                const statsGrid = document.getElementById('statsGrid');
+                const stats = [
+                    [data.history_messages || 0, 'Сообщений в истории'],
+                    [data.plugins_loaded?.length || 0, 'Плагинов'],
+                    [data.custom_commands?.length || 0, 'Своих команд'],
+                    [data.voice_enabled ? 'Да' : 'Нет', 'Озвучка'],
+                ];
+                statsGrid.replaceChildren(...stats.map(([value, label]) => {
+                    const item = document.createElement('div'); item.className = 'stat-item';
+                    const statValue = document.createElement('div'); statValue.className = 'stat-value'; statValue.textContent = String(value);
+                    const statLabel = document.createElement('div'); statLabel.className = 'stat-label'; statLabel.textContent = label;
+                    item.append(statValue, statLabel); return item;
+                }));
                 
                 // Системный промпт
                 document.getElementById('systemPrompt').value = data.system_prompt || '';
@@ -520,9 +528,13 @@ print('Привет из админ-панели!')" rows="8"></textarea>
                     container.innerHTML = '<span style="color:var(--text-muted);">Нет сохранённых файлов</span>';
                     return;
                 }
-                container.innerHTML = data.files.map(f => `
-                    <button class="btn" onclick="loadCode('${f}')">📄 ${f}</button>
-                `).join('');
+                container.replaceChildren(...data.files.map((filename) => {
+                    const button = document.createElement('button');
+                    button.type = 'button'; button.className = 'btn';
+                    button.textContent = '📄 ' + String(filename);
+                    button.addEventListener('click', () => loadCode(String(filename)));
+                    return button;
+                }));
             } catch(e) {
                 document.getElementById('savedFiles').innerHTML = 'Ошибка загрузки';
             }
@@ -549,6 +561,13 @@ print('Привет из админ-панели!')" rows="8"></textarea>
             toast.className = 'toast' + (isError ? ' error' : '') + ' show';
             setTimeout(() => toast.classList.remove('show'), 2500);
         }
+
+        document.getElementById('logoutButton').addEventListener('click', logout);
+        document.getElementById('loginButton').addEventListener('click', login);
+        document.getElementById('saveSettingsButton').addEventListener('click', saveSettings);
+        document.getElementById('saveAndRunButton').addEventListener('click', saveAndRunCode);
+        document.getElementById('saveCodeButton').addEventListener('click', saveCode);
+        document.getElementById('runSavedCodeButton').addEventListener('click', runSavedCode);
 
         // Запуск
         checkAuth();

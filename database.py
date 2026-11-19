@@ -5,6 +5,7 @@ import os
 import time
 import json
 import uuid
+import hashlib
 import sqlite3
 import re
 import threading
@@ -12,13 +13,17 @@ from flask import session
 
 import identity as _identity
 
-DB_PATH = os.path.join(os.path.dirname(__file__), "novamind_chats.db")
+DB_PATH = os.path.abspath(os.getenv(
+    "NOVAMIND_DB_PATH", os.path.join(os.path.dirname(__file__), "novamind_chats.db")
+))
 _db_lock = threading.Lock()
 
 def get_db():
     """Возвращает подключение к SQLite (thread-local)."""
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False, timeout=5)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA busy_timeout = 5000")
+    conn.execute("PRAGMA foreign_keys = ON")
     return conn
 
 def _ensure_column(conn, table, column, ddl):
@@ -29,7 +34,9 @@ def _ensure_column(conn, table, column, ddl):
     try:
         conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
     except sqlite3.OperationalError:
-        pass  # параллельный процесс уже добавил колонку
+        # Suppress only the expected race where another worker added it first.
+        if column not in [row[1] for row in conn.execute(f"PRAGMA table_info({table})")]:
+            raise
 
 def init_db():
     """Создаёт таблицы если не существуют."""
@@ -54,11 +61,34 @@ def init_db():
                 filename TEXT NOT NULL,
                 PRIMARY KEY (chat_id, filename)
             );
+            CREATE TABLE IF NOT EXISTS media_file_owners (
+                storage TEXT NOT NULL,
+                filename TEXT NOT NULL,
+                owner TEXT NOT NULL,
+                created_at REAL NOT NULL,
+                PRIMARY KEY (storage, filename)
+            );
+            CREATE INDEX IF NOT EXISTS idx_media_file_owner
+                ON media_file_owners(owner, created_at DESC);
+            CREATE TABLE IF NOT EXISTS oauth_challenges (
+                purpose TEXT NOT NULL,
+                challenge_hash TEXT NOT NULL,
+                browser_hash TEXT NOT NULL,
+                nonce TEXT NOT NULL,
+                code_verifier TEXT,
+                created_at REAL NOT NULL,
+                expires_at REAL NOT NULL,
+                consumed_at REAL,
+                PRIMARY KEY (purpose, challenge_hash)
+            );
+            CREATE INDEX IF NOT EXISTS idx_oauth_challenges_expiry
+                ON oauth_challenges(expires_at);
             CREATE INDEX IF NOT EXISTS idx_messages_chat ON messages(chat_id);
             CREATE INDEX IF NOT EXISTS idx_chats_updated ON chats(updated_at DESC);
         """)
         # владелец чата: без него все пользователи видели чужие чаты
         _ensure_column(conn, "chats", "owner", "TEXT NOT NULL DEFAULT ''")
+        _ensure_column(conn, "oauth_challenges", "code_verifier", "TEXT")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_chats_owner ON chats(owner, updated_at DESC)")
     print("[DB] База данных чатов инициализирована:", DB_PATH)
 
@@ -144,6 +174,146 @@ def has_chat_image(chat_id, filename):
     with get_db() as conn:
         return conn.execute("SELECT 1 FROM chat_images WHERE chat_id=? AND filename=?",
                             (chat_id, filename)).fetchone() is not None
+
+
+def remember_media_owner(filename, owner=None, storage="media"):
+    """Persist a media file's owner; an existing filename can never change owners."""
+    filename = str(filename or "").strip()
+    storage = str(storage or "").strip()
+    owner = str(owner if owner is not None else _identity.chat_owner() or "").strip()
+    if not filename or not storage or not owner:
+        return False
+    with _db_lock, get_db() as conn:
+        row = conn.execute(
+            "SELECT owner FROM media_file_owners WHERE storage=? AND filename=?",
+            (storage, filename),
+        ).fetchone()
+        if row:
+            return row["owner"] == owner
+        conn.execute(
+            "INSERT INTO media_file_owners (storage, filename, owner, created_at)"
+            " VALUES (?, ?, ?, ?)",
+            (storage, filename, owner, time.time()),
+        )
+    return True
+
+
+def media_file_allowed(filename, owner=None, storage="media"):
+    """Check exact durable owner scope; missing identity and records fail closed."""
+    filename = str(filename or "").strip()
+    storage = str(storage or "").strip()
+    owner = str(owner if owner is not None else _identity.chat_owner() or "").strip()
+    if not filename or not storage or not owner:
+        return False
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT 1 FROM media_file_owners WHERE storage=? AND filename=? AND owner=?",
+            (storage, filename, owner),
+        ).fetchone()
+    return row is not None
+
+
+def _oauth_digest(value):
+    return hashlib.sha256(str(value).encode("utf-8")).hexdigest()
+
+
+def create_oauth_challenge(purpose, challenge, browser_id, nonce, ttl=300, code_verifier=None):
+    """Persist a short-lived OAuth challenge bound to one browser session."""
+    purpose = str(purpose or "")
+    challenge = str(challenge or "")
+    browser_id = str(browser_id or "")
+    nonce = str(nonce or "")
+    if purpose not in {"google_oauth_state", "google_gsi_nonce"}:
+        return False
+    if not challenge or not browser_id or not nonce:
+        return False
+    now = time.time()
+    ttl = max(60, min(int(ttl), 600))
+    with _db_lock, get_db() as conn:
+        conn.execute(
+            "DELETE FROM oauth_challenges WHERE expires_at < ? "
+            "OR (consumed_at IS NOT NULL AND consumed_at < ?)",
+            (now, now - 600),
+        )
+        try:
+            conn.execute(
+                "INSERT INTO oauth_challenges "
+                "(purpose, challenge_hash, browser_hash, nonce, code_verifier, created_at, expires_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (purpose, _oauth_digest(challenge), _oauth_digest(browser_id), nonce,
+                 code_verifier, now, now + ttl),
+            )
+        except sqlite3.IntegrityError:
+            return False
+    return True
+
+
+def consume_oauth_challenge(purpose, challenge, browser_id):
+    """Atomically consume one unexpired challenge; return challenge data or ``None``."""
+    purpose = str(purpose or "")
+    challenge = str(challenge or "")
+    browser_id = str(browser_id or "")
+    if purpose not in {"google_oauth_state", "google_gsi_nonce"}:
+        return None
+    if not challenge or not browser_id:
+        return None
+    now = time.time()
+    with _db_lock, get_db() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT nonce, code_verifier FROM oauth_challenges "
+            "WHERE purpose=? AND challenge_hash=? AND browser_hash=? "
+            "AND expires_at>? AND consumed_at IS NULL",
+            (purpose, _oauth_digest(challenge), _oauth_digest(browser_id), now),
+        ).fetchone()
+        if row is None:
+            return None
+        updated = conn.execute(
+            "UPDATE oauth_challenges SET consumed_at=? "
+            "WHERE purpose=? AND challenge_hash=? AND browser_hash=? "
+            "AND expires_at>? AND consumed_at IS NULL",
+            (now, purpose, _oauth_digest(challenge), _oauth_digest(browser_id), now),
+        )
+        if updated.rowcount != 1:
+            return None
+        return {"nonce": str(row["nonce"]), "code_verifier": row["code_verifier"]}
+
+
+def register_chat_media_image(chat_id, filename, storage="media"):
+    """Atomically bind a generated image to its chat and durable file owner."""
+    chat_id = str(chat_id or "").strip()
+    filename = str(filename or "").strip()
+    storage = str(storage or "").strip()
+    actor = str(_identity.chat_owner() or "").strip()
+    if not chat_id or not filename or not storage:
+        return False
+    with _db_lock, get_db() as conn:
+        chat = conn.execute("SELECT owner FROM chats WHERE id=?", (chat_id,)).fetchone()
+        if not chat:
+            return False
+        chat_owner = str(chat["owner"] or "").strip()
+        if actor and chat_owner and actor != chat_owner:
+            return False
+        if actor and not chat_owner and not _identity.is_admin_owner(actor):
+            return False
+        owner = chat_owner or actor
+        if not owner:
+            return False
+        existing = conn.execute(
+            "SELECT owner FROM media_file_owners WHERE storage=? AND filename=?",
+            (storage, filename),
+        ).fetchone()
+        if existing and existing["owner"] != owner:
+            return False
+        if not existing:
+            conn.execute(
+                "INSERT INTO media_file_owners (storage, filename, owner, created_at)"
+                " VALUES (?, ?, ?, ?)",
+                (storage, filename, owner, time.time()),
+            )
+        conn.execute("INSERT OR IGNORE INTO chat_images (chat_id, filename) VALUES (?, ?)",
+                     (chat_id, filename))
+    return True
 
 
 def delete_chat(chat_id):
@@ -435,6 +605,30 @@ def due_jobs(now, limit=5):
             "SELECT * FROM scheduled_jobs WHERE status='active' AND next_run_at<=? "
             "ORDER BY next_run_at LIMIT ?", (now, limit)).fetchall()
     return [_job_dict(row) for row in rows]
+
+
+def claim_due_jobs(now, limit=5, lease_seconds=3600):
+    """Atomically reserve due jobs; an expired lease makes crashed work retryable."""
+    init_schedule()
+    now = float(now)
+    limit = max(1, min(int(limit), 100))
+    lease_until = now + max(60, min(float(lease_seconds), 86400))
+    claimed = []
+    with _db_lock, get_db() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        rows = conn.execute(
+            "SELECT * FROM scheduled_jobs WHERE status='active' AND next_run_at<=? "
+            "ORDER BY next_run_at LIMIT ?", (now, limit),
+        ).fetchall()
+        for row in rows:
+            cursor = conn.execute(
+                "UPDATE scheduled_jobs SET next_run_at=? "
+                "WHERE id=? AND status='active' AND next_run_at<=?",
+                (lease_until, row["id"], now),
+            )
+            if cursor.rowcount:
+                claimed.append(_job_dict(row))
+    return claimed
 
 
 def update_job(job_id, **fields):

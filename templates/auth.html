@@ -315,16 +315,24 @@
         </div>
     </div>
 
+    <script src="/static/csrf.js"></script>
     <!-- Google Sign-In -->
     <script src="https://accounts.google.com/gsi/client" async defer></script>
     <script>
-        const GOOGLE_CLIENT_ID = "{{ google_client_id }}";
+        const GOOGLE_CLIENT_ID = {{ google_client_id|tojson }};
+        let GOOGLE_NONCE = "";
 
         // Инициализация Google Sign-In
-        function initGoogleSignIn() {
+        async function initGoogleSignIn() {
             if (GOOGLE_CLIENT_ID && window.google) {
+                try {
+                    const nonceResponse = await fetch('/api/auth/google/nonce', {cache: 'no-store'});
+                    const nonceData = await nonceResponse.json();
+                    if (!nonceResponse.ok || !nonceData.nonce) throw new Error('nonce unavailable');
+                    GOOGLE_NONCE = nonceData.nonce;
                 google.accounts.id.initialize({
                     client_id: GOOGLE_CLIENT_ID,
+                    nonce: GOOGLE_NONCE,
                     callback: handleGoogleResponse,
                     auto_select: false,
                 });
@@ -340,6 +348,9 @@
                         width: '100%'
                     }
                 );
+                } catch (_error) {
+                    document.getElementById('loginError').textContent = 'Не удалось подготовить вход через Google';
+                }
             }
         }
 
@@ -348,19 +359,25 @@
             setTimeout(initGoogleSignIn, 500);
         });
 
-        function handleGoogleResponse(response) {
+        async function handleGoogleResponse(response) {
             try {
-                const payload = JSON.parse(atob(response.credential.split('.')[1]));
-                const nick = payload.name || payload.email.split('@')[0];
-
-                localStorage.setItem('nova_user_nick', nick);
-                localStorage.setItem('nova_user_email', payload.email || '');
-                localStorage.setItem('nova_user_avatar', payload.picture || '');
+                const serverResponse = await fetch('/api/auth/google/one-tap', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({credential: response.credential, nonce: GOOGLE_NONCE})
+                });
+                const result = await serverResponse.json();
+                if (!serverResponse.ok || !result.success || !result.profile) {
+                    throw new Error(result.error || 'Google verification failed');
+                }
+                const profile = result.profile;
+                localStorage.setItem('nova_user_nick', profile.nick || '');
+                localStorage.setItem('nova_user_email', profile.email || '');
+                localStorage.setItem('nova_user_avatar', profile.avatar || '');
                 localStorage.setItem('nova_is_admin', 'false');
                 localStorage.setItem('nova_google_login', 'true');
-
                 window.location.href = '/chat';
-            } catch (e) {
+            } catch (_error) {
                 document.getElementById('loginError').textContent = 'Ошибка входа через Google';
             }
         }
@@ -397,8 +414,6 @@
                 return;
             }
 
-            localStorage.setItem('nova_user_nick', nick);
-
             try {
                 const resp = await fetch('/api/admin/login', {
                     method: 'POST',
@@ -406,15 +421,17 @@
                     body: JSON.stringify({username: 'admin', code: code})
                 });
                 const data = await resp.json();
-                localStorage.setItem('nova_is_admin', data.success ? 'true' : 'false');
+                if (!resp.ok || !data.success) throw new Error(data.error || 'Ошибка входа');
+                localStorage.setItem('nova_user_nick', nick);
+                localStorage.setItem('nova_is_admin', 'true');
                 window.location.href = '/chat';
             } catch (e) {
                 localStorage.setItem('nova_is_admin', 'false');
-                window.location.href = '/chat';
+                errorEl.textContent = e.message || 'Ошибка входа';
             }
         }
 
-        function handleRegister() {
+        async function handleRegister() {
             const nick = document.getElementById('regNick').value.trim();
             const code = document.getElementById('regCode').value.trim();
             const confirm = document.getElementById('regCodeConfirm').value.trim();
@@ -426,21 +443,27 @@
             if (code !== confirm) { errorEl.textContent = 'Коды не совпадают'; return; }
             if (!agree) { errorEl.textContent = 'Примите условия использования'; return; }
 
-            localStorage.setItem('nova_user_nick', nick);
-            localStorage.setItem('nova_user_code', code);
-            localStorage.setItem('nova_is_admin', 'false');
-            syncServerSession(nick);
-            window.location.href = '/chat';
+            try {
+                await syncServerSession(nick);
+                localStorage.setItem('nova_user_nick', nick);
+                localStorage.setItem('nova_is_admin', 'false');
+                window.location.href = '/chat';
+            } catch (_error) {
+                errorEl.textContent = 'Не удалось создать сессию пользователя';
+            }
         }
 
         // Серверная сессия: без неё рабочая папка и агентный режим
         // не откроются — сервер не знает про вход по нику.
-        function syncServerSession(nick) {
-            fetch('/api/session/login', {
+        async function syncServerSession(nick) {
+            const response = await fetch('/api/session/login', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify({nick: nick})
-            }).catch(() => {});
+            });
+            const result = await response.json();
+            if (!response.ok || !result.success) throw new Error(result.error || 'Login failed');
+            return result;
         }
 
         function quickLogin(type) {

@@ -115,7 +115,8 @@ def remember_generated(chat_id, result):
     path = Path(mg.MEDIA_DIR) / name
     if (result.get("url") == "/media/" + name and result.get("path") == str(path)
             and not path.is_symlink() and path.is_file() and path.stat().st_size <= MAX_IMAGE_BYTES):
-        database.add_chat_image(chat_id, name)
+        if not database.register_chat_media_image(chat_id, name, storage="media"):
+            raise ValueError("Не удалось зарегистрировать владельца изображения.")
         result["editable"] = True
 
 

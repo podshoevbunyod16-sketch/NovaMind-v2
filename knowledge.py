@@ -579,10 +579,20 @@ def default_base() -> KnowledgeBase:
         return _DEFAULT
 
 
-def search_tool(query: str, limit: int = DEFAULT_LIMIT, owner: str = "") -> dict:
-    """Инструмент ``knowledge_search``: результаты + готовые цитаты."""
+def search_tool(query: str, limit: int = DEFAULT_LIMIT, owner: str = "",
+                *, any_owner: bool = False) -> dict:
+    """Инструмент ``knowledge_search``: результаты + готовые цитаты.
+
+    Пустой owner нельзя трактовать как «все владельцы»: такой scope допустим
+    только для явно авторизованного административного вызова, который
+    передаёт ``any_owner=True``.
+    """
+    if not any_owner and not str(owner or "").strip():
+        return {"ok": False, "error": {"type": "permission_denied",
+                                         "message": "Для поиска нужна identity владельца",
+                                         "retryable": False}}
     base = default_base()
-    hits = base.search(query, limit=limit, owner=owner)
+    hits = base.search(query, limit=limit, owner=owner, any_owner=any_owner)
     if not hits:
         return {"ok": True, "query": query, "results": [],
                 "note": "В базе знаний нет подходящих фрагментов"}

@@ -35,6 +35,24 @@ let aiStatus       = null;
 const THEMES = ['aurora'];
 const ONLY_THEME = 'aurora';
 
+// URL из localStorage и ответов API перед вставкой в href/src.
+// Разрешены только http(s) и относительные пути; javascript:, data: и
+// protocol-relative URL не должны доходить до DOM.
+function safeUrl(value) {
+  const raw = String(value ?? '').trim();
+  if (!raw || /^(?:\/\/|javascript:|data:|vbscript:|file:)/i.test(raw)) return '';
+  try {
+    const parsed = new URL(raw, window.location.origin);
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return '';
+    if (/^[a-z][a-z\d+.-]*:/i.test(raw) && !/^https?:/i.test(raw)) return '';
+    return parsed.origin === window.location.origin && !/^[a-z][a-z\d+.-]*:/i.test(raw)
+      ? `${parsed.pathname}${parsed.search}${parsed.hash}`
+      : parsed.href;
+  } catch (_) {
+    return '';
+  }
+}
+
 // ========== DOM-ЭЛЕМЕНТЫ ==========
 const input         = document.getElementById('chat-input');
 const sendBtn       = document.getElementById('sendBtn');
@@ -155,27 +173,14 @@ function toggleCalmMotion() {
   document.getElementById('btn-calm')?.classList.toggle('active', motion === 'calm');
 })();
 
-// ========== ПРОВЕРКА АВТОРИЗАЦИИ ==========
-if (!localStorage.getItem('nova_user_nick')) {
-  window.location.href = '/';
-}
-
 // ========== АДМИН-ПАНЕЛЬ И НИКНЕЙМ ==========
 (function () {
-  const isAdmin = localStorage.getItem('nova_is_admin') === 'true';
   const adminLink = document.getElementById('admin-link');
   const displayNick = document.getElementById('display-nick');
   if (displayNick) {
-    displayNick.textContent = localStorage.getItem('nova_user_nick') || 'Пользователь';
+    displayNick.textContent = 'Пользователь';
   }
-  if (isAdmin && adminLink) adminLink.style.display = 'flex';
-
-  const googleAvatar = localStorage.getItem('nova_user_avatar');
-  const avatarEl = document.querySelector('.user-avatar');
-  if (googleAvatar && avatarEl) {
-    avatarEl.innerHTML = `<img src="${googleAvatar}" alt="" style="width:100%;height:100%;border-radius:50%;object-fit:cover;">`;
-    avatarEl.style.background = 'none';
-  }
+  if (adminLink) adminLink.style.display = 'none';
 })();
 
 // ========== ВЫХОД ==========
@@ -358,12 +363,14 @@ function attachVideo() {
 function appendMediaMessage(kind, url, title) {
   const wrap = document.createElement('div');
   wrap.className = 'message ai';
+  const mediaUrl = safeUrl(url);
+  if (!mediaUrl) return;
   const media = kind === 'audio'
-    ? `<audio controls src="${url}"></audio>`
+    ? `<audio controls src="${escapeHtml(mediaUrl)}"></audio>`
     : kind === 'video'
-      ? `<video controls playsinline preload="metadata" src="${url}"></video>`
-      : `<img src="${url}" alt="${escapeHtml(title)}">`;
-  wrap.innerHTML = `<div class="msg-avatar">✦</div><div class="msg-body"><div class="msg-name">NovaMind</div><div class="msg-bubble media-bubble"><div class="media-title">${escapeHtml(title)}</div>${media}<div class="media-actions"><a class="media-download" href="${url}" target="_blank" rel="noopener">Открыть файл</a></div></div></div>`;
+      ? `<video controls playsinline preload="metadata" src="${escapeHtml(mediaUrl)}"></video>`
+      : `<img src="${escapeHtml(mediaUrl)}" alt="${escapeHtml(title)}">`;
+  wrap.innerHTML = `<div class="msg-avatar">✦</div><div class="msg-body"><div class="msg-name">NovaMind</div><div class="msg-bubble media-bubble"><div class="media-title">${escapeHtml(title)}</div>${media}<div class="media-actions"><a class="media-download" href="${escapeHtml(mediaUrl)}" target="_blank" rel="noopener">Открыть файл</a></div></div></div>`;
   chatContainer.appendChild(wrap);
   scrollToBottom();
 }
@@ -373,7 +380,7 @@ function appendMediaMessage(kind, url, title) {
 // ══════════════════════════════════════════
 function mediaBubbleHtml(payload) {
   const kind = payload.kind || 'image';
-  const url = payload.url || '';
+  const url = safeUrl(payload.url);
   const title = payload.title || (kind === 'image' ? 'Изображение' : kind === 'audio' ? 'Аудио' : 'Видео');
   const provider = payload.provider ? ` · ${escapeHtml(payload.provider)}` : '';
   const seconds = payload.elapsed_ms ? ` · ${(payload.elapsed_ms / 1000).toFixed(1)} c` : '';
@@ -401,7 +408,7 @@ function mediaBubbleHtml(payload) {
 const MEDIA_ICON = { image: '🖼', audio: '🔊', video: '🎬' };
 
 function turnMediaPlayer(item) {
-  const url = escapeHtml(item.url || '');
+  const url = escapeHtml(safeUrl(item.url));
   const alt = escapeHtml(item.prompt || item.title || 'Сгенерировано ИИ');
   if (item.kind === 'audio') return `<audio controls preload="metadata" src="${url}"></audio>`;
   if (item.kind === 'video') return `<video controls playsinline preload="metadata" src="${url}"></video>`;
@@ -417,9 +424,11 @@ function turnMediaCaption(item) {
   const bits = [`${MEDIA_ICON[item.kind] || '✦'} ${escapeHtml(item.model_name || item.model || 'ИИ')}`];
   if (item.elapsed_ms) bits.push(`${(item.elapsed_ms / 1000).toFixed(1)} c`);
   const name = escapeHtml(item.filename || `novamind_${item.kind || 'media'}`);
+  const mediaUrl = safeUrl(item.url);
+  if (!mediaUrl) return `<figcaption><span class="turn-media-meta">${bits.join(' · ')}</span></figcaption>`;
   return `<figcaption><span class="turn-media-meta">${bits.join(' · ')}</span>`
     + editImageButton(item)
-    + `<a class="turn-media-dl" href="${escapeHtml(item.url || '')}" download="${name}" title="Скачать">⬇ Скачать</a></figcaption>`;
+    + `<a class="turn-media-dl" href="${escapeHtml(mediaUrl)}" download="${name}" title="Скачать">⬇ Скачать</a></figcaption>`;
 }
 
 function turnMediaItemHtml(item) {
@@ -1496,15 +1505,16 @@ function createAssistantTurn(options = {}) {
 }
 
 function sourceItemHtml(source, index) {
+  const sourceUrl = safeUrl(source.url);
+  if (!sourceUrl) return '';
   const host = source.host || hostFromUrl(source.url);
   const letter = (source.title || host || '?').trim().charAt(0).toUpperCase();
   return `
-    <a class="source-item" href="${escapeHtml(source.url)}" target="_blank" rel="noopener noreferrer"
+    <a class="source-item" href="${escapeHtml(sourceUrl)}" target="_blank" rel="noopener noreferrer"
        title="${escapeHtml(source.title || source.url)}">
       <span class="source-num">${index + 1}</span>
       <img class="source-fav" alt="" loading="lazy"
-           src="https://icons.duckduckgo.com/ip3/${encodeURIComponent(host)}.ico"
-           onerror="this.remove()">
+           src="https://icons.duckduckgo.com/ip3/${encodeURIComponent(host)}.ico">
       <span class="source-txt">
         <span class="source-title">${escapeHtml(source.title || host)}</span>
         <span class="source-host">${escapeHtml(host)}</span>
@@ -2063,6 +2073,9 @@ function appendMessage(role, content, meta = null) {
       const cards = JSON.parse(content.replace('COMPOSIO_CARDS:', ''));
       wrap.innerHTML = `<div class="msg-avatar">✦</div><div class="msg-body"><div class="msg-name">NovaMind</div><div class="msg-bubble">${renderComposioCards(cards)}</div></div>`;
       chatContainer.appendChild(wrap);
+      wrap.querySelectorAll('[data-composio-toolkit]').forEach((button) => {
+        button.addEventListener('click', () => composioAuthFromChat(button.dataset.composioToolkit || ''));
+      });
       scrollToBottom();
       return;
     } catch (e) {}
@@ -2093,7 +2106,10 @@ function appendMessage(role, content, meta = null) {
   let imageHtml = '';
   const imageMatch = content.match(/!\[Image\]\((.*?)\)/);
   if (imageMatch) {
-    imageHtml = `<img src="${imageMatch[1]}" alt="Generated image" style="max-width:100%;border-radius:12px;margin-top:8px;">`;
+    const imageUrl = safeUrl(imageMatch[1]);
+    imageHtml = imageUrl
+      ? `<img src="${escapeHtml(imageUrl)}" alt="Generated image" style="max-width:100%;border-radius:12px;margin-top:8px;">`
+      : '';
     formatted = formatted.replace(/!\[Image\]\(.*?\)/, '');
   }
 
@@ -2329,7 +2345,7 @@ function stopRecording() {
 // ========== ДОСТУП К НАСТРОЙКАМ ==========
 // Панель настроек — только администратору. Сервер отдаёт её 403 обычному
 // пользователю; здесь мы просто не показываем кнопку, ведущую в отказ.
-let serverAdmin = localStorage.getItem('nova_is_admin') === 'true';
+let serverAdmin = false;
 // Кнопку в шапке не показываем «на секунду» до ответа сервера: сразу прячем.
 document.addEventListener('DOMContentLoaded', applySettingsAccess);
 
@@ -2349,9 +2365,36 @@ async function loadSettingsAccess() {
     const response = await fetch('/api/session/check', { headers: { Accept: 'application/json' } });
     if (response.ok) {
       const data = await response.json();
-      if (typeof data.admin === 'boolean') {
-        serverAdmin = data.admin;
-        localStorage.setItem('nova_is_admin', serverAdmin ? 'true' : 'false');
+      serverAdmin = data.admin === true;
+      localStorage.setItem('nova_is_admin', serverAdmin ? 'true' : 'false');
+      const identityKeys = ['nova_user_nick', 'nova_user_email', 'nova_user_avatar', 'nova_google_login'];
+      if (!data.signed_in) {
+        identityKeys.forEach((key) => localStorage.removeItem(key));
+        if (window.location.pathname === '/chat') window.location.replace('/');
+      } else {
+        localStorage.setItem('nova_user_nick', data.nick || 'Пользователь');
+        if (data.google_login) {
+          localStorage.setItem('nova_google_login', 'true');
+          localStorage.setItem('nova_user_email', data.email || '');
+          localStorage.setItem('nova_user_avatar', data.avatar || '');
+        } else {
+          ['nova_google_login', 'nova_user_email', 'nova_user_avatar']
+            .forEach((key) => localStorage.removeItem(key));
+        }
+        const nick = document.getElementById('display-nick');
+        if (nick) nick.textContent = data.nick || 'Пользователь';
+        const adminLink = document.getElementById('admin-link');
+        if (adminLink) adminLink.style.display = serverAdmin ? 'flex' : 'none';
+        const avatarUrl = data.google_login ? safeUrl(data.avatar) : '';
+        const avatarEl = document.querySelector('.user-avatar');
+        if (avatarUrl && avatarEl) {
+          const image = document.createElement('img');
+          image.src = avatarUrl;
+          image.alt = '';
+          image.style.cssText = 'width:100%;height:100%;border-radius:50%;object-fit:cover;';
+          avatarEl.replaceChildren(image);
+          avatarEl.style.background = 'none';
+        }
       }
     }
   } catch (_) {
@@ -3101,11 +3144,11 @@ function renderComposioCards(cards) {
     const statusColor = card.connected ? 'var(--ok)' : 'var(--text-3)';
     const statusText = card.connected ? '✅ Подключено' : 'Нажми — подключить';
     return `
-      <div onclick="composioAuthFromChat('${card.slug}')" class="suggestion-card" style="text-align:center;cursor:pointer">
+      <button type="button" data-composio-toolkit="${escapeHtml(card.slug)}" class="suggestion-card" style="text-align:center;cursor:pointer">
         <div class="card-icon">${icon}</div>
         <div class="card-title">${escapeHtml(card.name || card.slug)}</div>
         <div class="card-desc" style="color:${statusColor}">${statusText}</div>
-      </div>`;
+      </button>`;
   }).join('');
 
   return `
@@ -3118,6 +3161,7 @@ function renderComposioCards(cards) {
 
 function renderComposioAuth(toolkit, url) {
   const icon = COMPOSIO_ICONS[toolkit] || '🔗';
+  const authUrl = safeUrl(url);
   return `
     <div style="padding:4px 2px">
       <div style="font-size:26px;margin-bottom:8px">${icon}</div>
@@ -3126,7 +3170,7 @@ function renderComposioAuth(toolkit, url) {
         Нажми кнопку ниже — откроется страница авторизации.<br>
         После входа вернись и введи <code>/composio accounts</code>
       </div>
-      <a class="media-download" href="${escapeHtml(url)}" target="_blank" rel="noopener">🔐 Войти →</a>
+      ${authUrl ? `<a class="media-download" href="${escapeHtml(authUrl)}" target="_blank" rel="noopener">🔐 Войти →</a>` : '<span>Ссылка авторизации недоступна</span>'}
       <div style="margin-top:10px;font-size:11px;color:var(--text-4)">
         После: <code>/composio tools ${escapeHtml(toolkit)}</code>
       </div>

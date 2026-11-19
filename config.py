@@ -76,6 +76,13 @@ SITE_URL             = os.getenv("SITE_URL", "http://localhost:5000").rstrip("/"
 GOOGLE_REDIRECT_URI  = os.getenv("GOOGLE_REDIRECT_URI",
                                  f"{SITE_URL}/auth/google/callback")
 
+# Enable transport security only when production explicitly advertises HTTPS.
+_DEPLOYMENT_ENV = (os.getenv("FLASK_ENV") or os.getenv("APP_ENV") or "").strip().lower()
+COOKIE_SECURE = _DEPLOYMENT_ENV == "production" and SITE_URL.lower().startswith("https://")
+HSTS_ENABLED = COOKIE_SECURE
+if _DEPLOYMENT_ENV == "production" and not COOKIE_SECURE:
+    raise RuntimeError("Production requires an HTTPS SITE_URL")
+
 def _persistent_session_secret():
     """Ключ подписи cookie, переживающий рестарт.
 
@@ -102,11 +109,14 @@ def _persistent_session_secret():
 
 # ---------- Безопасность ----------
 # Пароль администратора. Предсказуемый дефолт опасен: без ADMIN_CODE
-# в окружении генерируем случайный код и печатаем его в лог при старте —
-# войти «по умолчанию» снаружи уже нельзя.
-ADMIN_CODE        = os.getenv("ADMIN_CODE") or secrets.token_urlsafe(9)
-ADMIN_CODE_IS_DEFAULT = not bool(os.getenv("ADMIN_CODE"))
-ADMIN_SESSION_KEY = os.getenv("SESSION_SECRET") or _persistent_session_secret()
+# в окружении генерируем случайный код; значение никогда не попадает в логи.
+_SESSION_SECRET_FROM_ENV = os.getenv("SESSION_SECRET", "").strip()
+if _DEPLOYMENT_ENV == "production" and len(_SESSION_SECRET_FROM_ENV) < 32:
+    raise RuntimeError("Production requires an explicit SESSION_SECRET of at least 32 characters")
+_ADMIN_CODE_FROM_ENV = os.getenv("ADMIN_CODE", "").strip()
+ADMIN_CODE        = _ADMIN_CODE_FROM_ENV or secrets.token_urlsafe(9)
+ADMIN_CODE_IS_DEFAULT = not bool(_ADMIN_CODE_FROM_ENV)
+ADMIN_SESSION_KEY = _SESSION_SECRET_FROM_ENV or _persistent_session_secret()
 # Логин и код администратора. ADMIN_USER можно переопределить в .env,
 # иначе вход идёт под именем admin с кодом ADMIN_CODE.
 ADMIN_USER        = os.getenv("ADMIN_USER", "admin").strip() or "admin"

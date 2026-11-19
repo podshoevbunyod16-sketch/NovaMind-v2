@@ -1,4 +1,5 @@
 """Headless graphics fail honestly and leave a usable file-based alternative."""
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -43,16 +44,24 @@ def test_first_party_shell_result_adds_headless_hint():
 def test_headless_version_renders_frames(tmp_path):
     """The standalone, non-GUI example still renders frames and an SVG preview."""
     script = EXAMPLES / "headless_spin.py"
-    result = subprocess.run([sys.executable, str(script)], capture_output=True,
+    # Запускаем копию: headless_spin.py пишет SVG/PNG/GIF рядом со своим файлом,
+    # а тест не должен менять examples/turtle_spin/spin.gif.
+    isolated_script = tmp_path / script.name
+    shutil.copy2(script, isolated_script)
+    result = subprocess.run([sys.executable, str(isolated_script)], check=False, capture_output=True,
                             text=True, timeout=120)
     assert result.returncode == 0, result.stderr
     assert "кадров: 72" in result.stdout
     assert "раскадровка: spin_frames.png" in result.stdout
-    svg = (EXAMPLES / "spin.svg").read_text(encoding="utf-8")
+    assert "раскадровка: spin_frames.png" in result.stdout
+    svg = (tmp_path / "spin.svg").read_text(encoding="utf-8")
     assert svg.count("<polyline") >= 10
     assert "animateTransform" in svg
-    png = (EXAMPLES / "spin_frames.png").read_bytes()
+    png = (tmp_path / "spin_frames.png").read_bytes()
     assert png.startswith(b"\x89PNG\r\n\x1a\n") and len(png) > 1000
+    gif = tmp_path / "spin.gif"
+    assert gif.exists()
+    assert gif.read_bytes().startswith(b"GIF89a")
 
 
 def test_headless_geometry_matches_square():
@@ -79,7 +88,14 @@ def test_tcl_error_without_display_is_also_explained():
     assert "графического экрана" in outcome["hint"] and "SVG" in outcome["hint"]
 
 
-def test_gif_is_actually_animated():
-    data = (EXAMPLES / "spin.gif").read_bytes()
+def test_gif_is_actually_animated(tmp_path):
+    script = EXAMPLES / "headless_spin.py"
+    isolated_script = tmp_path / script.name
+    shutil.copy2(script, isolated_script)
+    result = subprocess.run([sys.executable, str(isolated_script)], check=False, capture_output=True,
+                            text=True, timeout=120)
+    assert result.returncode == 0, result.stderr
+    data = (tmp_path / "spin.gif").read_bytes()
     assert data.startswith(b"GIF89a")
+    assert data.count(b"\x21\xf9\x04") >= 10
     assert data.count(b"\x21\xf9\x04") >= 10

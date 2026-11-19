@@ -1,18 +1,30 @@
 """
 routes/admin.py — Административные маршруты
 """
-from flask import Blueprint, request, jsonify, session, render_template, redirect
-import subprocess
-import json
+import base64
+import hashlib
+import hmac
 import logging
 import os
+import secrets
+import sqlite3
+import subprocess
+from functools import wraps
+from urllib.parse import urlencode
+
 import requests
-from urllib.parse import quote
+from flask import Blueprint, jsonify, redirect, render_template, request, session
+
 import config
 import groq_rotation
-from groq_rotation import GROQ_KEYS, GROQ_KEY_COOLDOWN, get_groq_key_status
-from config import (ADMIN_CREDENTIALS, PROVIDERS, GOOGLE_CLIENT_ID,
-                    GOOGLE_CLIENT_SECRET, GOOGLE_REDIRECT_URI)
+from config import (
+    ADMIN_CREDENTIALS,
+    GOOGLE_CLIENT_ID,
+    GOOGLE_CLIENT_SECRET,
+    GOOGLE_REDIRECT_URI,
+    PROVIDERS,
+)
+from groq_rotation import GROQ_KEY_COOLDOWN, GROQ_KEYS, get_groq_key_status
 
 log = logging.getLogger(__name__)
 
@@ -54,21 +66,209 @@ SAVED_CODES_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(_
 
 admin_bp = Blueprint("admin", __name__)
 
+
+def _admin_required(view):
+    """Require the server-side admin session for data-changing/admin data APIs."""
+    @wraps(view)
+    def wrapped(*args, **kwargs):
+        if not session.get("admin_logged_in"):
+            return jsonify({"error": "Требуется вход администратора"}), 401
+        return view(*args, **kwargs)
+    return wrapped
+
+
+def _verify_google_id_token(token, expected_nonce=None):
+    """Verify Google's ID token, or fail closed when google-auth is unavailable."""
+    try:
+        from google.auth.transport import requests as google_requests
+        from google.oauth2 import id_token
+        claims = id_token.verify_oauth2_token(
+            token, google_requests.Request(), GOOGLE_CLIENT_ID
+        )
+    except Exception:  # noqa: BLE001 - verifier failures must reject the token
+        log.warning("Google ID-token verification failed")
+        return None
+
+    if not isinstance(claims, dict):
+        log.warning("Google ID-token claims rejected")
+        return None
+    issuer = claims.get("iss")
+    if issuer not in {"accounts.google.com", "https://accounts.google.com"}:
+        log.warning("Google ID-token issuer rejected")
+        return None
+    if expected_nonce is not None:
+        token_nonce = claims.get("nonce")
+        if not isinstance(token_nonce, str) or not hmac.compare_digest(token_nonce, expected_nonce):
+            log.warning("Google ID-token nonce rejected")
+            return None
+    if not claims.get("email") or claims.get("email_verified") is not True:
+        log.warning("Google ID-token email is not verified")
+        return None
+    return claims
+
+
+def _safe_provider_models():
+    """Expose model identifiers only; never serialize provider configuration."""
+    safe = {}
+    for provider, details in PROVIDERS.items():
+        if not isinstance(details, dict):
+            safe[str(provider)] = []
+            continue
+        models = details.get("models", [])
+        safe[str(provider)] = [
+            str(model.get("id")) for model in models
+            if isinstance(model, dict) and model.get("id")
+        ]
+    return safe
+
 @admin_bp.route('/admin/login')
 def admin_login_page():
     return render_template('admin.html')
 
 # ========== GOOGLE OAUTH ==========
 
+def _establish_google_session(user_info):
+    nick = str(user_info.get("name") or user_info.get("email", "User").split("@")[0])[:64]
+    email = str(user_info.get("email") or "").strip().lower()
+    picture = str(user_info.get("picture") or "")[:2048]
+    session.clear()
+    session.permanent = True
+    import identity
+    identity.browser_id()
+    session["_csrf_token"] = secrets.token_urlsafe(32)
+    session["nova_user_nick"] = nick
+    session["nova_user_email"] = email
+    session["nova_user_avatar"] = picture
+    session["nova_google_login"] = True
+    session["nova_is_admin"] = False
+    return {"nick": nick, "email": email, "avatar": picture}
+
+
+def _rotate_admin_session(username):
+    session.clear()
+    session.permanent = True
+    import identity
+    identity.browser_id()
+    session["_csrf_token"] = secrets.token_urlsafe(32)
+    session["admin_logged_in"] = True
+    session["admin_username"] = username
+
+
+@admin_bp.route("/auth/google")
+def auth_google_start():
+    """Start a state-, nonce- and PKCE-bound Google authorization-code flow."""
+    if not GOOGLE_CLIENT_ID or not GOOGLE_CLIENT_SECRET or not GOOGLE_REDIRECT_URI:
+        return "Google OAuth is not configured", 503
+    state = secrets.token_urlsafe(32)
+    nonce = secrets.token_urlsafe(32)
+    verifier = secrets.token_urlsafe(64)
+    code_challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode("ascii")).digest())
+    code_challenge = code_challenge.rstrip(b"=").decode("ascii")
+    import database
+    import identity
+    try:
+        stored = database.create_oauth_challenge(
+            "google_oauth_state", state, identity.browser_id(), nonce, ttl=300,
+            code_verifier=verifier,
+        )
+    except sqlite3.Error:
+        log.exception("Google OAuth challenge persistence failed")
+        return "OAuth is temporarily unavailable", 503
+    if not stored:
+        return "OAuth is temporarily unavailable", 503
+    params = {
+        "client_id": GOOGLE_CLIENT_ID,
+        "redirect_uri": GOOGLE_REDIRECT_URI,
+        "response_type": "code",
+        "scope": "openid email profile",
+        "state": state,
+        "nonce": nonce,
+        "code_challenge": code_challenge,
+        "code_challenge_method": "S256",
+    }
+    return redirect("https://accounts.google.com/o/oauth2/v2/auth?" + urlencode(params))
+
+
+@admin_bp.route("/api/auth/google/nonce")
+def google_one_tap_nonce():
+    """Issue a one-use Google Identity Services nonce for this browser session."""
+    if not GOOGLE_CLIENT_ID:
+        return jsonify({"error": "Google sign-in is not configured"}), 503
+    nonce = secrets.token_urlsafe(32)
+    import database
+    import identity
+    try:
+        stored = database.create_oauth_challenge(
+            "google_gsi_nonce", nonce, identity.browser_id(), nonce, ttl=300,
+        )
+    except sqlite3.Error:
+        log.exception("Google One Tap nonce persistence failed")
+        return jsonify({"error": "Google sign-in is temporarily unavailable"}), 503
+    if not stored:
+        return jsonify({"error": "Google sign-in is temporarily unavailable"}), 503
+    response = jsonify({"nonce": nonce})
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+@admin_bp.route("/api/auth/google/one-tap", methods=["POST"])
+def google_one_tap_login():
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"error": "Invalid Google credential"}), 400
+    credential = str(data.get("credential") or "")
+    nonce = str(data.get("nonce") or "")
+    if not credential or len(credential) > 20000 or not nonce or len(nonce) > 200:
+        return jsonify({"error": "Invalid Google credential"}), 400
+    import database
+    import identity
+    try:
+        challenge = database.consume_oauth_challenge(
+            "google_gsi_nonce", nonce, identity.browser_id(),
+        )
+    except sqlite3.Error:
+        log.exception("Google One Tap nonce verification failed")
+        return jsonify({"error": "Google sign-in is temporarily unavailable"}), 503
+    if not challenge or not hmac.compare_digest(challenge["nonce"], nonce):
+        return jsonify({"error": "Google sign-in challenge expired; please try again"}), 401
+    user_info = _verify_google_id_token(credential, expected_nonce=nonce)
+    if not user_info:
+        return jsonify({"error": "Invalid Google credential"}), 401
+    profile = _establish_google_session(user_info)
+    return jsonify({"success": True, "profile": profile})
+
+
 @admin_bp.route('/auth/google/callback')
 def auth_google_callback():
+    state = request.args.get("state", "")
+    if not state or len(state) > 200:
+        return "Недействительный запрос авторизации", 400
+    import database
+    import identity
+    try:
+        challenge = database.consume_oauth_challenge(
+            "google_oauth_state", state, identity.browser_id(),
+        )
+    except sqlite3.Error:
+        log.exception("Google OAuth state verification failed")
+        return "Ошибка авторизации", 503
+    if not challenge:
+        return "Недействительный или истёкший запрос авторизации", 400
+    nonce = challenge.get("nonce")
+    code_verifier = challenge.get("code_verifier")
+    if (not isinstance(nonce, str) or not nonce
+            or not isinstance(code_verifier, str) or not 43 <= len(code_verifier) <= 128):
+        return "Недействительный запрос авторизации", 400
+
     code = request.args.get('code')
     error = request.args.get('error')
 
     if error:
-        return f'Ошибка авторизации: {error}', 400
-    if not code:
+        return 'Авторизация Google отменена', 400
+    if not code or len(code) > 4096:
         return 'Не получен код авторизации', 400
+    if not GOOGLE_CLIENT_ID or not GOOGLE_CLIENT_SECRET or not GOOGLE_REDIRECT_URI:
+        return "Google OAuth is not configured", 503
 
     token_url = "https://oauth2.googleapis.com/token"
     token_data = {
@@ -76,36 +276,30 @@ def auth_google_callback():
         "client_id": GOOGLE_CLIENT_ID,
         "client_secret": GOOGLE_CLIENT_SECRET,
         "redirect_uri": GOOGLE_REDIRECT_URI,
-        "grant_type": "authorization_code"
+        "grant_type": "authorization_code",
+        "code_verifier": code_verifier,
     }
 
     try:
         token_resp = requests.post(token_url, data=token_data, timeout=10)
         token_resp.raise_for_status()
         token_json = token_resp.json()
+        if not isinstance(token_json, dict):
+            return 'Недействительный ответ Google', 502
 
         id_token_jwt = token_json.get("id_token")
-        if not id_token_jwt:
+        if not id_token_jwt or not isinstance(id_token_jwt, str) or len(id_token_jwt) > 20000:
             return 'Не получен ID токен', 400
 
-        import base64 as b64
-        payload = id_token_jwt.split('.')[1]
-        payload += '=' * (4 - len(payload) % 4)
-        user_info = json.loads(b64.urlsafe_b64decode(payload).decode('utf-8'))
+        user_info = _verify_google_id_token(id_token_jwt, expected_nonce=nonce)
+        if not user_info:
+            return 'Недействительный ID токен', 401
 
-        nick = user_info.get('name', user_info.get('email', 'User').split('@')[0])
-        email = user_info.get('email', '')
-        picture = user_info.get('picture', '')
-
-        session['nova_user_nick'] = nick
-        session['nova_user_email'] = email
-        session['nova_user_avatar'] = picture
-        session['nova_google_login'] = True
-        session['nova_is_admin'] = False
-
-        return redirect(f'/chat?nick={quote(nick)}&email={quote(email)}')
-    except Exception as e:
-        return f'Ошибка авторизации: {str(e)}', 500
+        _establish_google_session(user_info)
+        return redirect('/chat')
+    except Exception:  # noqa: BLE001 - convert unexpected provider failures to a safe response
+        log.warning("Google OAuth callback failed")
+        return 'Ошибка авторизации', 500
 
 # ========== API АВТОРИЗАЦИИ ==========
 
@@ -141,8 +335,7 @@ def admin_login():
         return jsonify({'success': False, 'error': error})
 
     security.login_limiter.succeed(ip_key, user_key)
-    session['admin_logged_in'] = True
-    session['admin_username'] = username
+    _rotate_admin_session(username)
     return jsonify({'success': True, 'username': username})
 
 @admin_bp.route('/api/session/login', methods=['POST'])
@@ -188,12 +381,16 @@ def session_login():
 @admin_bp.route('/api/session/check')
 def session_check():
     """Кто вошёл — интерфейсу нужно знать, открывать ли рабочую папку."""
+    google_login = bool(session.get("nova_google_login"))
     return jsonify({
         'signed_in': bool(session.get('admin_logged_in') or session.get('nova_google_login')
                           or session.get('nova_signed_in') or session.get('nova_user_nick')
                           or session.get('username')),
         'nick': session.get('admin_username') or session.get('nova_user_nick') or '',
         'admin': bool(session.get('admin_logged_in')),
+        'google_login': google_login,
+        'email': session.get('nova_user_email', '') if google_login else '',
+        'avatar': session.get('nova_user_avatar', '') if google_login else '',
     })
 
 
@@ -218,10 +415,11 @@ def admin_check():
 # ========== АДМИН API ==========
 
 @admin_bp.route('/api/admin/stats')
+@_admin_required
 def admin_stats():
     from routes import chat as chat_routes
     return jsonify({
-        "models": PROVIDERS,
+        "models": _safe_provider_models(),
         "current_provider": config.current_provider,
         "current_model": config.current_model,
         "history_messages": len(chat_routes.contents),
@@ -232,6 +430,7 @@ def admin_stats():
     })
 
 @admin_bp.route('/api/admin/settings', methods=['POST'])
+@_admin_required
 def admin_settings():
     data = request.get_json() or {}
     # Настройки живут в config — их читают ai_providers и чат; локальные копии ничего не меняли
@@ -255,6 +454,7 @@ def admin_settings():
     return jsonify({"success": True})
 
 @admin_bp.route('/api/admin/save_code', methods=['POST'])
+@_admin_required
 def admin_save_code():
     data = request.get_json() or {}
     filename = os.path.basename(str(data.get("filename", "script.py"))) or "script.py"
@@ -269,6 +469,7 @@ def admin_save_code():
     return jsonify({"success": True, "filepath": filepath})
 
 @admin_bp.route('/api/admin/run_saved_code', methods=['POST'])
+@_admin_required
 def admin_run_saved_code():
     data = request.get_json() or {}
     filename = os.path.basename(str(data.get("filename", "script.py"))) or "script.py"
@@ -284,10 +485,12 @@ def admin_run_saved_code():
         return jsonify({"result": output or "Нет вывода"})
     except subprocess.TimeoutExpired:
         return jsonify({"error": "Превышено время (10 сек)"}), 408
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+    except (OSError, subprocess.SubprocessError):
+        log.exception("Saved code execution failed")
+        return jsonify({"error": "Не удалось выполнить сохранённый скрипт"}), 500
 
 @admin_bp.route('/api/admin/saved_codes')
+@_admin_required
 def admin_saved_codes():
     code_dir = SAVED_CODES_DIR
     if not os.path.exists(code_dir):
@@ -296,6 +499,7 @@ def admin_saved_codes():
     return jsonify({"files": files})
 
 @admin_bp.route('/api/admin/load_code')
+@_admin_required
 def admin_load_code():
     filename = os.path.basename(request.args.get("file", ""))
     code_dir = SAVED_CODES_DIR
@@ -310,6 +514,7 @@ def admin_load_code():
 # ========== СТАТУС КЛЮЧЕЙ GROQ (админка) ==========
 
 @admin_bp.route('/api/admin/groq_keys')
+@_admin_required
 def admin_groq_keys():
     """Статус всех Groq API ключей"""
     return jsonify({
@@ -320,6 +525,7 @@ def admin_groq_keys():
     })
 
 @admin_bp.route('/api/admin/groq_keys/reset', methods=['POST'])
+@_admin_required
 def admin_reset_groq_keys():
     """Сбросить все cooldown'ы (для админа)"""
     with groq_rotation._groq_lock:
@@ -327,4 +533,3 @@ def admin_reset_groq_keys():
             key_info["exhausted_at"] = None
         groq_rotation.groq_key_index = 0
     return jsonify({"success": True, "message": "Все ключи сброшены"})
-

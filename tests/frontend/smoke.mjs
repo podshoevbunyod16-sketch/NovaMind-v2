@@ -320,7 +320,12 @@ if (!html.includes('window.NovaSpeech')) throw new Error('не удалось в
 
 const virtualConsole = new VirtualConsole();
 const consoleErrors = [];
-virtualConsole.on('jsdomError', (error) => consoleErrors.push('jsdomError: ' + error.message));
+virtualConsole.on('jsdomError', (error) => {
+  // jsdom cannot commit a cross-document navigation; it is not a page JS error.
+  if (!error.message.startsWith('Not implemented: navigation to another Document')) {
+    consoleErrors.push('jsdomError: ' + error.message);
+  }
+});
 virtualConsole.on('error', (...args) => consoleErrors.push('console.error: ' + args.join(' ')));
 
 const dom = new JSDOM(html, {
@@ -1272,8 +1277,9 @@ check('вход: тема всегда Aurora', (() => {
   return adoc.documentElement.getAttribute('data-glass-theme') === 'aurora'
     && authDom.window.localStorage.getItem('nova_theme') === 'aurora';
 })());
+authDom.window.quickLogin('Guest');
+await new Promise((resolve) => setTimeout(resolve, 0));
 check('вход: гость заполняет форму и логинится', (() => {
-  authDom.window.quickLogin('Guest');
   return adoc.getElementById('loginNick').value === 'Guest_User'
     && authDom.window.localStorage.getItem('nova_user_nick') === 'Guest_User';
 })());

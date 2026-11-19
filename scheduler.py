@@ -311,7 +311,8 @@ def run_job(job, runner=None):
 
 def tick(runner=None, now=None):
     """Один проход планировщика: выполняет всё, чему пора."""
-    jobs = database.due_jobs(now or time.time(), limit=5)
+    current = time.time() if now is None else float(now)
+    jobs = database.claim_due_jobs(current, limit=5)
     results = []
     for job in jobs:
         try:

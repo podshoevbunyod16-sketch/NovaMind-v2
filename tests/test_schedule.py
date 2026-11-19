@@ -1,6 +1,8 @@
 """Задачи по расписанию (бонус Б4): cron, интервалы, поток и API."""
 from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor
 import json
+import threading
 import time
 
 import pytest
@@ -117,6 +119,23 @@ def test_due_jobs_only_returns_ripe(db):
     database.update_job(later["id"], next_run_at=time.time() + 3600)
     due = database.due_jobs(time.time())
     assert [job["id"] for job in due] == [ripe["id"]]
+
+
+def test_concurrent_workers_claim_each_due_job_once(db):
+    job = scheduler.create_job("иван", "не запускать дважды", "every", "1h")
+    now = time.time()
+    database.update_job(job["id"], next_run_at=now - 1)
+    barrier = threading.Barrier(2)
+
+    def claim():
+        barrier.wait()
+        return database.claim_due_jobs(now, limit=5)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        claims = list(pool.map(lambda _index: claim(), range(2)))
+    claimed = [item for batch in claims for item in batch]
+    assert [item["id"] for item in claimed] == [job["id"]]
+    assert database.due_jobs(now) == []
 
 
 def test_list_and_delete_jobs(db):
