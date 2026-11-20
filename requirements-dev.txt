@@ -1,5 +1,5 @@
 # Зависимости для разработки и тестов
 -r requirements.txt
 pytest>=8
-alembic>=1.13
+alembic>=1.20.1
 sqlalchemy>=2.0
