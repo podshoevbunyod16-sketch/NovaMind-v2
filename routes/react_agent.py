@@ -269,11 +269,7 @@ def _run(goal, record_id, *, chat_id="", history=None, observations=None,
         memory_context=memory_context, integration_context=integration_context,
         mcp_tools=tool_catalog, skill_context=skill_context,
         search_requested=bool(search_requested), image_source=image_source,
-<<<<<<< HEAD
-        auto_prompt=auto_prompt,
-=======
         tool_discovery=True,
->>>>>>> origin/arena/77aefa37-novamind-v2
         max_steps=action_limit or max(1, int(os.getenv("AGENT_MAX_STEPS", "20"))),
         timeout=run_timeout,
         max_tokens=max_tokens,

@@ -110,11 +110,7 @@ class AgentContext:
     skill_context: str = ""
     search_requested: bool = False
     image_source: str = ""
-<<<<<<< HEAD
-    auto_prompt: str = ""
-=======
     tool_discovery: bool = False
->>>>>>> origin/arena/77aefa37-novamind-v2
     clock: Callable[[], float] = time.monotonic
 
 
