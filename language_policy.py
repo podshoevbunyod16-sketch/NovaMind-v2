@@ -211,6 +211,27 @@ def directive(code) -> str:
     )
 
 
+#: Answer in the language the user writes in (the default for every reply).
+MATCH_QUERY = "auto"
+
+_MATCH_DIRECTIVE = (
+    f"[{MARKER} {MATCH_QUERY}] ANSWER LANGUAGE (required): reply in the SAME language "
+    "as the user's latest message. Detect it from that message, not from the interface "
+    "or earlier turns: Tajik (Cyrillic with letters ҷ, ӣ, ӯ, қ, ғ, ҳ), Russian, English, "
+    "Uzbek, etc. If the message mixes languages, use the language it is mostly written in. "
+    "If the user explicitly asks for another language, follow that request for that answer.\n"
+    "Write every user-visible part of the reply in that language: prose, headings, lists, "
+    "tool summaries, warnings, error notes and follow-up questions.\n"
+    "Keep exactly as-is: source code, file paths, shell commands, URLs, API, tool and "
+    "parameter names, identifiers and data quoted from tools or web pages."
+)
+
+
+def match_directive() -> str:
+    """English instruction: answer in the language of the user's own message."""
+    return _MATCH_DIRECTIVE
+
+
 def apply_to_system(system, code=None) -> str:
     """Append (or refresh) the answer-language directive in a system prompt.
 
@@ -219,8 +240,8 @@ def apply_to_system(system, code=None) -> str:
     caller without any system message still gets the right answer language.
     """
     text = str(system or "").strip()
-    lang = normalize(code) or current_language()
-    block = directive(lang)
+    # No explicit language → follow the user's message, not the interface language.
+    block = directive(code) if normalize(code) else match_directive()
     if not block:
         return text
     cleaned = _DIRECTIVE_RE.sub("", text).strip()
