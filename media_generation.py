@@ -471,7 +471,7 @@ _POLL_TTS_TTL = 1800
 _POLL_TTS_LOCK = threading.Lock()
 
 
-def _pollinations_catalog(path: str, timeout: float = 8.0) -> list:
+def _pollinations_catalog(path: str, timeout: float = 15.0) -> list:
     """Сырой ответ JSON-каталога Pollinations (список моделей)."""
     resp = requests.get(f"{POLLINATIONS_BASE_URL}{path}", timeout=timeout)
     resp.raise_for_status()
@@ -598,7 +598,7 @@ def _pollinations_media_entries(force=False) -> list:
     entries = []
     for media_type, endpoint in endpoints.items():
         try:
-            resp = requests.get(endpoint, timeout=12)
+            resp = requests.get(endpoint, timeout=15)
             resp.raise_for_status()
             payload = resp.json()
 

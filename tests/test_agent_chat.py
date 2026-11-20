@@ -137,13 +137,18 @@ def test_git_command_runs_through_the_sandbox(admin_client, monkeypatch, sandbox
 
 def test_workspace_tools_are_hidden_from_guest_prompt(client, sandbox, monkeypatch):
     seen = []
-    script(monkeypatch, ["Ответ без файлов"], seen)
-    ndjson(client.post("/api/agent/stream", json={"message": "что в папке?"}))
+    script(monkeypatch, [
+        '{"tool":"tool_search","arguments":{"query":"file tree shell web search"}}',
+        "Ответ без файлов",
+    ], seen)
+    events = ndjson(client.post("/api/agent/stream", json={"message": "что в папке?"}))
     assert seen
     names = {item["function"]["name"] for item in (seen[0]["tools"] or [])}
-    assert "web_search" in names
-    assert not names.intersection({"shell", "file_read", "file_write", "file_edit",
-                                   "file_search", "file_tree"})
+    assert names == {"tool_search", "use_tool"}
+    discovered = {item["tool"] for item in events_of(events, "tool")[0]["result"]["tools"]}
+    assert "web_search" in discovered
+    assert not discovered.intersection({"shell", "file_read", "file_write", "file_edit",
+                                        "file_search", "file_tree"})
 
 
 # ══════════════ медиа ══════════════

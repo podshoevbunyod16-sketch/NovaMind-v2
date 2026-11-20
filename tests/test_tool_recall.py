@@ -27,11 +27,18 @@ def test_activity_events_keep_tool_identity_and_result():
 def test_agent_receives_registered_schemas_before_first_model_turn(admin_client, sandbox,
                                                                     monkeypatch):
     seen = []
-    script(monkeypatch, ["Просто ответ."], seen)
+    script(monkeypatch, [
+        '{"tool":"tool_search","arguments":{"query":"web search and shell"}}',
+        "Просто ответ.",
+    ], seen)
     events = ndjson(admin_client.post("/api/agent/stream", json={"message": "привет"}))
     assert seen[0]["tools"]
     names = {item["function"]["name"] for item in seen[0]["tools"]}
-    assert "web_search" in names and "shell" in names
+    assert names == {"tool_search", "use_tool"}
+    search_tool = events_of(events, "tool")[0]
+    assert search_tool["name"] == "tool_search"
+    discovered = {t["tool"] for t in search_tool["result"]["tools"]}
+    assert "web_search" in discovered and "shell" in discovered
     assert answer_of(events) == "Просто ответ."
 
 

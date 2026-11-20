@@ -121,5 +121,5 @@ def test_model_receives_registered_tools_not_markup_prompt(admin_client, sandbox
     _post(admin_client, "запусти ls в терминале и покажи файлы проекта")
     assert seen and seen[0]["tools"]
     names = {item["function"]["name"] for item in seen[0]["tools"]}
-    assert {"shell", "file_read", "file_write", "file_search", "file_tree", "web_search", "web_open"} <= names
+    assert names == {"tool_search", "use_tool"}
     assert "```bash```" not in model_text(seen)

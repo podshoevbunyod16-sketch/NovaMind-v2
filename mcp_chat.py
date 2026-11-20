@@ -81,6 +81,22 @@ def complete_with_mcp(messages: list[dict[str, Any]], *, system: str, provider: 
         tools = []
     if not tools:
         return None, None, []
+    if len(tools) > 5:
+        last_user = next(
+            (str(m.get("content") or "") for m in reversed(messages or [])
+             if isinstance(m, dict) and m.get("role") == "user"),
+            "",
+        )
+        if last_user:
+            import tool_search
+            matched = tool_search.search_tools(last_user, [], tools, limit=5, goal=last_user)
+            matched_keys = {(m.get("server_id", ""), m.get("tool", "")) for m in matched}
+            tools = [
+                item for item in tools
+                if (str(item.get("server_id") or ""), str(item.get("name") or "")) in matched_keys
+            ]
+        if not tools:
+            return None, None, []
 
     prompt = system + _tool_prompt(tools)
     history = list(messages)

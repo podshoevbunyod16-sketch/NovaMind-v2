@@ -78,25 +78,13 @@ def _run(goal, record_id, *, chat_id="", history=None, observations=None,
             connected = mcp_manager.discover_tools()
             if role != "admin":
                 connected = [item for item in connected if (item.get("annotations") or {}).get("readOnlyHint") is True]
-            servers = mcp_manager.server_summaries() if role == "admin" else []
             tool_catalog = [{"server_id": item.get("server_id"), "server_name": item.get("server_name"),
                              "name": item.get("name"), "description": item.get("description"),
                              "inputSchema": item.get("inputSchema"), "annotations": item.get("annotations")}
                             for item in connected]
-            integration_context = (
-                "Connected MCP servers and discovered tools: "
-                + json.dumps({"servers": servers, "tools": tool_catalog}, ensure_ascii=False,
-                             separators=(",", ":"))
-                + "\nChoose a tool by the meaning of the user's goal and the tool's described "
-                "capabilities, not by keyword overlap, previous examples or the name alone. Match "
-                "synonyms and the implied action against the description and inputSchema; if a "
-                "tool fits, call it with arguments derived from the request. Do not call "
-                "search_mcp_servers merely because the user asked for a search or an action: "
-                "check the connected catalogue first. If no suitable tool is listed or the "
-                "context was truncated, call mcp_list with the server_id; for a large catalogue "
-                "continue with next_offset. Perform only the requested action, inspect "
-                "isError/errors and never report success without confirming evidence."
-            )
+            # Do not inject the entire MCP tool catalog upfront; tool_search
+            # discovers only the subset relevant to the user's goal.
+            integration_context = ""
     except Exception:
         current_app.logger.warning("Не удалось перечислить MCP-инструменты", exc_info=True)
     try:
@@ -210,12 +198,13 @@ def _run(goal, record_id, *, chat_id="", history=None, observations=None,
                 event.setdefault("trace_id", trace_id)
                 event.setdefault("role", role)
                 event.setdefault("prompt_versions", prompt_versions)
+                provider_usage = event.pop("provider_usage", None) or {}
                 if chat_id and event.get("status") in {"completed", "paused", "incomplete"} and "usage" not in event:
                     try:
                         import usage_stats
                         usage = usage_stats.record_turn(
                             chat_id, chosen_provider, chosen_model, str(goal or ""),
-                            str(event.get("reply") or ""), usage={})
+                            str(event.get("reply") or ""), usage=provider_usage)
                         event["usage"] = usage
                         events.put({"type": "usage", "usage": usage})
                     except Exception:
@@ -239,6 +228,11 @@ def _run(goal, record_id, *, chat_id="", history=None, observations=None,
             deferred.append(event)
         else:
             events.put(event)
+    env_timeout = os.getenv("AGENT_TIMEOUT")
+    run_timeout = float(env_timeout) if env_timeout else (
+        max(240.0, ai_providers.default_timeout_for(chosen_provider) * 2)
+        if chosen_provider in ("openai_compatible", "pollinations") else 240.0
+    )
     context = AgentContext(
         goal=goal, complete=ai_providers.chat_completion, emit=emit,
         provider=chosen_provider, model=chosen_model, history=history or [],
@@ -248,8 +242,9 @@ def _run(goal, record_id, *, chat_id="", history=None, observations=None,
         memory_context=memory_context, integration_context=integration_context,
         mcp_tools=tool_catalog, skill_context=skill_context,
         search_requested=bool(search_requested), image_source=image_source,
+        tool_discovery=True,
         max_steps=action_limit or max(1, int(os.getenv("AGENT_MAX_STEPS", "20"))),
-        timeout=float(os.getenv("AGENT_TIMEOUT", "240")),
+        timeout=run_timeout,
         max_tokens=max_tokens,
     )
 

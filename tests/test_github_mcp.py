@@ -93,6 +93,7 @@ def test_mcp_only_request_exposes_registry_tools_without_shell(
     monkeypatch.setenv("AGENT_CONFIRM", "off")
     seen = []
     script(monkeypatch, [
+        '{"tool":"tool_search","arguments":{"query":"github repository shell"}}',
         '```mcp_call\n{"server_id":"github-real-id","tool":"search_repositories",'
         '"arguments":{"query":"flask"}}\n```',
         "Нашёл demo/repo.",
@@ -104,10 +105,13 @@ def test_mcp_only_request_exposes_registry_tools_without_shell(
     assert calls == [
         ("github-real-id", "search_repositories", {"query": "flask"}),
     ]
-    tool = events_of(events, "tool")[0]
-    assert tool["name"] == "mcp_call" and tool["status"] == "ok"
+    tools_ran = events_of(events, "tool")
+    assert tools_ran[0]["name"] == "tool_search"
+    discovered = {item["tool"] for item in tools_ran[0]["result"]["tools"]}
+    assert "shell" not in discovered and "search_repositories" in discovered
+    assert tools_ran[1]["name"] == "mcp_call" and tools_ran[1]["status"] == "ok"
     offered = {item["function"]["name"] for item in seen[0]["tools"]}
-    assert "shell" not in offered and "mcp_call" in offered
+    assert offered == {"tool_search", "use_tool"}
     assert answer_of(events) == "Нашёл demo/repo."
 
 

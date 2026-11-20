@@ -26,6 +26,7 @@ def tool_presentation(name: str, arguments=None, result=None, *, status="ok") ->
         "video": ("Создал видео" if not failed else "Не создал видео", "media"),
         "task": ("Создал задачу" if not failed else "Не создал задачу", "task"),
         "task_done": ("Закрыл задачу" if not failed else "Не закрыл задачу", "task"),
+        "tool_search": ("Подобрал инструменты", "search_tools"),
     }
     label, kind = labels.get(name, ("Выполнил действие" if not failed else "Действие не выполнено", "tool"))
     if name == "mcp_call" and failed:

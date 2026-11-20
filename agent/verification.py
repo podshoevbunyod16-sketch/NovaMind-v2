@@ -33,7 +33,7 @@ def verify_task(goal: str, observations: list[dict], *, image_source: str = "") 
     needs_check = needs_action and bool(_CHECK.search(goal))
     successful = []
     for item in observations or []:
-        if not isinstance(item, dict):
+        if not isinstance(item, dict) or item.get("tool") == "tool_search":
             continue
         result = item.get("result") if isinstance(item.get("result"), dict) else {}
         if result.get("ok") is True:
