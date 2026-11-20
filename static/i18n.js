@@ -584,6 +584,23 @@
 
   let lang = normalizeLang(localStorage.getItem(STORAGE_KEY)) || DEFAULT_LANG;
 
+  // Каждый запрос к API несёт выбранный язык. Так ответ модели не зависит от
+  // сессии и от настроек сервера, которые сбрасываются при перезапуске
+  // (бесплатный хостинг): интерфейс и ответы агента остаются на одном языке.
+  const nativeFetch = window.fetch.bind(window);
+  window.fetch = (input, init = {}) => {
+    try {
+      const url = typeof input === 'string' ? input : ((input && input.url) || '');
+      const sameOrigin = url.startsWith('/') || url.startsWith(location.origin);
+      if (sameOrigin && url.includes('/api/')) {
+        const headers = new Headers((init && init.headers) || (input && input.headers) || {});
+        if (!headers.has('X-UI-Language')) headers.set('X-UI-Language', lang);
+        init = { ...(init || {}), headers };
+      }
+    } catch (_) { /* не мешаем запросу, если заголовок не удалось добавить */ }
+    return nativeFetch(input, init);
+  };
+
   function normalizeLang(value) {
     const v = String(value || '').trim().toLowerCase();
     return SUPPORTED.includes(v) ? v : null;
@@ -712,6 +729,23 @@
             try { localStorage.setItem(STORAGE_KEY, serverLang); } catch (_) {}
             location.reload();
           }
+        })
+        .catch(() => {});
+    } else {
+      // Язык уже выбран в этом браузере, но сервер мог забыть его (перезапуск):
+      // передаём выбор браузера серверу, чтобы у фоновых задач был тот же язык.
+      fetch('/api/settings/lang')
+        .then((r) => (r.ok ? r.json() : null))
+        .then((data) => {
+          const serverLang = normalizeLang(data && data.language);
+          if (serverLang && serverLang !== lang) {
+            return fetch('/api/settings/lang', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ language: lang }),
+            });
+          }
+          return null;
         })
         .catch(() => {});
     }
