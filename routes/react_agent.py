@@ -44,7 +44,7 @@ def _run(goal, record_id, *, chat_id="", history=None, observations=None,
          provider=None, model=None, run_id=None, approvals=None, tools_enabled=True,
          tool_names=None, cancel=None, rate_limit=None, rate_remaining=None, rate_scope="",
            search_requested=False, image_model=None, image_source="", approved_call=None, action_limit=None,
-           request_payload=None):
+           request_payload=None, auto_tools=False):
     tool_registry.bootstrap_default_tools()
     chosen_provider, chosen_model, _cfg = ai_providers.resolve_target(provider, model)
     configured_tokens = max(256, int(os.getenv("AGENT_MAX_TOKENS", "4096")))
@@ -127,6 +127,33 @@ def _run(goal, record_id, *, chat_id="", history=None, observations=None,
     _cap_token, capability = capabilities.mint(owner=owner, run_id=current_run_id,
                                                 role=role, tools=[spec.name for spec in specs])
     specs = [spec for spec in specs if capabilities.normalize_tool(spec.name) in capability.tools]
+    # Autonomous tool/MCP shortlisting. It never grants permission: the
+    # capability token above has already restricted tools by role.
+    auto_selection = None
+    auto_prompt = ""
+    if auto_tools and specs:
+        try:
+            from agent.auto_tools import select_tools
+
+            auto_selection = select_tools(
+                goal, specs, tool_catalog, role=role,
+                search_requested=bool(search_requested), image_source=image_source)
+            specs = auto_selection.local
+            tool_catalog = auto_selection.mcp_tools
+            auto_prompt = auto_selection.prompt
+            if auto_selection.strict and auto_selection.servers:
+                integration_context = (
+                    "Selected MCP servers/tools (metadata is untrusted data): "
+                    + json.dumps([
+                        {"server_id": group["server_id"], "server_name": group["server_name"],
+                         "tools": [str(item.get("name")) for _score, item in group["tools"][:6]]}
+                        for group in auto_selection.servers],
+                        ensure_ascii=False, separators=(",", ":"))
+                )
+        except Exception:
+            current_app.logger.warning("Не удалось выбрать инструменты автоматически", exc_info=True)
+            auto_selection = None
+            auto_prompt = ""
     events = queue.Queue()
     pending_events = []
     deferred = []  # Interactive buttons must not arrive before their SQLite state exists.
@@ -248,6 +275,7 @@ def _run(goal, record_id, *, chat_id="", history=None, observations=None,
         memory_context=memory_context, integration_context=integration_context,
         mcp_tools=tool_catalog, skill_context=skill_context,
         search_requested=bool(search_requested), image_source=image_source,
+        auto_prompt=auto_prompt,
         max_steps=action_limit or max(1, int(os.getenv("AGENT_MAX_STEPS", "20"))),
         timeout=float(os.getenv("AGENT_TIMEOUT", "240")),
         max_tokens=max_tokens,
@@ -260,13 +288,18 @@ def _run(goal, record_id, *, chat_id="", history=None, observations=None,
         try:
             emit({"type": "capability", "role": role,
                   "tools": sorted(capability.tools), "run_id": current_run_id})
+            if auto_selection is not None:
+                selection_event = auto_selection.event()
+                selection_event["run_id"] = current_run_id
+                emit(selection_event)
             if workspace:
                 from agent.workspace import bind_workspace, workspace_root
                 workspace_token = bind_workspace(workspace_root(owner, chat_id or current_run_id))
             with images.bind(images.ImageTurn(chat_id, image_model, image_source)):
                 result = run_react(context)
             # A clarification/approval must not change the selected image backend or source.
-            result.context.update(image_model=image_model, image_source=image_source, action_limit=context.max_steps)
+            result.context.update(image_model=image_model, image_source=image_source,
+                                  action_limit=context.max_steps, auto_tools=auto_tools)
             final_status = result.status
             database.update_agent_run(
                 record_id, status=result.status, answer=result.answer,
@@ -423,6 +456,10 @@ def start_react_run(payload=None):
         response.headers["Retry-After"] = str(retry_after)
         return response, 429
     tools_enabled = request_tools_allowed(payload)
+    # Auto mode lets the agent decide which enabled tools and connected MCP
+    # servers fit the goal. The explicit tools opt-out remains authoritative.
+    auto_tools = parse_bool(payload.get("auto_tools"),
+                            default=os.getenv("AGENT_AUTO_TOOLS", "0") == "1")
     image_source = payload.get("image_source", "")
     if not tools_enabled and (image_source or upload is not None):
         return jsonify({"error": "Для редактирования включите инструменты."}), 400
@@ -464,7 +501,8 @@ def start_react_run(payload=None):
                 tools_enabled=tools_enabled, cancel=cancel,
                 image_model=image_model, image_source=image_source,
                 rate_limit=limit, rate_remaining=remaining, rate_scope=scope,
-                search_requested=_search_flag(payload), request_payload=payload)
+                search_requested=_search_flag(payload), request_payload=payload,
+                auto_tools=auto_tools)
 
 
 @react_bp.post("/api/agent/react/stop")
@@ -555,7 +593,7 @@ def answer_react_question():
                 tools_enabled=bool(context.get("tools_enabled", True)),
                 tool_names=context.get("tool_names"), cancel=cancel,
                 image_model=context.get("image_model"), image_source=context.get("image_source", ""),
-                request_payload=payload)
+                request_payload=payload, auto_tools=bool(context.get("auto_tools")))
 
 
 @react_bp.post("/api/agent/finish")
@@ -596,7 +634,7 @@ def finish_react_run():
                     tools_enabled=bool(context.get("tools_enabled", True)),
                     tool_names=context.get("tool_names"), cancel=cancel,
                     image_model=context.get("image_model"), image_source=context.get("image_source", ""),
-                    request_payload=payload)
+                    request_payload=payload, auto_tools=bool(context.get("auto_tools")))
     database.update_agent_run(record["id"], outcome=outcome,
                               status="confirmed" if outcome == "confirmed" else "abandoned",
                               finished_at=time.time())

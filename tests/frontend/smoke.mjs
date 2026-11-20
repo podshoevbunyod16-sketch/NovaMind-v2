@@ -81,6 +81,8 @@ const CHAT_STREAM = [
 
 // ── Синтетический поток агента: те же события, что отдаёт /api/agent/stream
 const AGENT_STREAM = [
+  { type: 'selection', mode: 'advisory', text: 'Выбрал подходящие инструменты: GitHub',
+    mcp_servers: ['github'], mcp_tools: ['list_issues'] },
   { type: 'stage', scene: 'agent', title: 'Работаю в Linux', text: 'Иду к цели по шагам…' },
   { type: 'plan', text: '1) посмотреть файлы\n2) запустить пример' },
   { type: 'task', task: { id: 'task-1', title: 'Проверить песочницу', status: 'doing', source: 'agent', steps: [] } },
@@ -1350,7 +1352,13 @@ await window.sendMessage();
 await settle();
 const agentBubble = lastAi();
 check('задача ушла в Linux', mock.agentRequests.length === 2);
+check('агент сам выбирает инструменты и MCP-серверы',
+  mock.agentRequests[1].auto_tools === true && mock.agentRequests[1].tools === true,
+  JSON.stringify(mock.agentRequests[1]));
 check('ИИ показывает план', agentBubble.querySelector('.stage-plan')?.textContent.includes('посмотреть файлы') === true);
+check('выбор инструментов показан в таймлайне',
+  agentBubble.textContent.includes('Выбрал подходящие инструменты'),
+  agentBubble.textContent);
 check('шаги видны в блоке «Работа в Linux»',
   agentBubble.querySelector('.agent-term-title')?.textContent === 'Работа в Linux'
   && agentBubble.querySelectorAll('.agent-term-row').length === 3

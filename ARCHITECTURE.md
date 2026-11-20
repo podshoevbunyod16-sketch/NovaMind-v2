@@ -26,7 +26,7 @@ Flask app (app.py) ── observability (request-id, errors, metrics)
 ## Потоки данных
 
 1. **Чат**: `POST /send_stream` → `routes/chat.py` → `ai_providers.chat_completion_stream` → NDJSON-события в браузер.
-2. **Агент**: `POST /api/agent/react` → `agent.loop` → инструмент → результат помечается как `<untrusted>` → модель → проверенный ответ. Опасные действия требуют подтверждения.
+2. **Агент**: `POST /api/agent/react` → `agent/auto_tools.py` (ранжирование разрешённых инструментов и обнаруженных MCP-серверов по цели) → `agent.loop` → инструмент → результат помечается как `<untrusted>` → модель → проверенный ответ. Опасные действия требуют подтверждения.
 3. **Терминал**: `POST /api/terminal/run` → `check_command` (allow-list, пути, пайпы) → `subprocess` без shell с санитизированным env и resource limits → аудит.
 4. **Файлы**: multipart → `upload_security.validate_upload` → временная папка → парсер → AI-анализ → удаление временных файлов.
 5. **Поиск**: несколько бэкендов с фолбэком; страницы читаются как недоверенный текст.
@@ -36,6 +36,7 @@ Flask app (app.py) ── observability (request-id, errors, metrics)
 - Владелец чата: `anon:<cookie id>`, `admin:<name>`, `email:<google email>`; проверяется сервером.
 - Агентные запуски: `queued/running/waiting_confirmation/succeeded/failed/cancelled/expired` (`jobs.py`) и отдельный реестр запусков в `routes/agent.py`.
 - Провайдеры: selected provider/model в `runtime_settings.json`; health/failover в `provider_manager.py`.
+- Автовыбор (`auto_tools: true`): advisory по умолчанию, `AUTO_TOOLS_STRICT=1` сужает меню; лимиты `AUTO_MCP_SERVERS`, `AUTO_MCP_TOOLS_PER_SERVER`, `AUTO_MCP_TOOLS_TOTAL`, `AUTO_TOOLS_MAX_LOCAL`. Каталог MCP является недоверенными метаданными.
 - Хранилище: SQLite сегодня, PostgreSQL через `DATABASE_URL` + Alembic; S3 — через будущий storage abstraction.
 
 ## Расширение

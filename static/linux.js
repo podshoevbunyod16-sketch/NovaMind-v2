@@ -107,7 +107,9 @@
     const chatRef = (typeof window.serverChatRequest === 'function')
       ? window.serverChatRequest() : {};
     try {
-      const payload = { message, tools, workspace: tools, reasoning: !!options.reasoning, ...chatRef };
+      // Auto mode: the server/agent decides which tools and MCP servers fit the goal.
+      const payload = { message, tools, auto_tools: true, workspace: tools,
+                        reasoning: !!options.reasoning, ...chatRef };
       if (tools && options.imageModel) payload.image_model = options.imageModel;
       if (tools && options.imageSource) payload.image_source = options.imageSource;
       let body = JSON.stringify(payload);
@@ -146,6 +148,8 @@
           case 'tool': turn.tool(event); break;
           // Динамическое получение инструментов после понимания запроса.
           case 'recall': if (turn.recall) turn.recall(event); break;
+          // Короткий список инструментов и MCP-серверов, выбранный агентом.
+          case 'selection': if (event.text) turn.step('🧭', event.text); break;
           // Думаем перед каждым шагом и ещё раз — после его выполнения.
           case 'think': if (turn.think) turn.think(event); break;
           // «Думал 4 c» — такой же шаг таймлайна, как команда или файл.

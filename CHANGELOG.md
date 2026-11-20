@@ -5,6 +5,8 @@
 ## [Unreleased] — production hardening (branch `arena/b009de6e-novamind-v2`)
 
 ### Added
+- Автономный выбор инструментов и MCP-серверов для ReAct (`agent/auto_tools.py`, `auto_tools: true`): ранжирование по цели, событие `selection`, консультативный/жёсткий режим, лимиты каталога, сохранение инструментов восстановления.
+- `tests/test_auto_tools.py`, `tests/test_agent_auto_tools.py`, проверки фронтенда для автоподбора.
 - `AUDIT_BEFORE_CHANGES.md`, `BASELINE_TEST_RESULTS.md`, characterization-тесты публичных контрактов.
 - `observability.py`: `X-Request-ID`, структурированные JSON-логи, redaction, метрики, `/healthz`, `/readyz`, `/metrics`, единые JSON-ошибки.
 - `web_hardening.py`: CSP/X-Content-Type-Options/Referrer-Policy/Permissions-Policy/frame protection/HSTS, безопасные cookie, Origin/Referer CSRF, опциональный double-submit, production config validation.

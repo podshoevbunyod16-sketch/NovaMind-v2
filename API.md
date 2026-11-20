@@ -29,7 +29,7 @@
 
 | Метод | Путь | Назначение |
 |---|---|---|
-| POST | `/api/agent/react` | ReAct-запуск, NDJSON-события |
+| POST | `/api/agent/react` | ReAct-запуск, NDJSON-события (`auto_tools: true` включает автоподбор инструментов и MCP-серверов) |
 | POST | `/api/agent/stream` | потоковый запуск |
 | GET | `/api/agent/status`, `/api/agent/runs`, `/api/agent/runs/<id>` | состояние и история запусков |
 | POST | `/api/agent/stop` | `{run_id}` — отмена |
@@ -37,7 +37,7 @@
 | GET/DELETE | `/api/agent/permissions` | правила «разрешить всегда» |
 | GET | `/api/usage` | учёт токенов/затрат |
 
-Все вызовы инструментов проходят политику рисков; web/document/MCP output помечается как not trusted. Скрытые chain-of-thought пользователю не выдаются.
+Все вызовы инструментов проходят политику рисков; web/document/MCP output помечается как not trusted. Скрытые chain-of-thought пользователю не выдаются. Событие `selection` содержит выбранные local tools, `mcp_servers` и `mcp_tools`; режим `advisory` или `strict`. Явное `tools: false` отключает инструменты и автоподбор.
 
 ## Файлы и медиа
 
