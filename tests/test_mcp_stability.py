@@ -518,8 +518,15 @@ def test_readonly_user_sees_only_permitted_schemas_even_after_listing(google_cli
         {'name': 'lookup_record', 'annotations': {'readOnlyHint': True}, 'description': 'lookup'},
         {'name': 'private_write', 'annotations': {'readOnlyHint': False}, 'description': 'write'}])
     seen = []
-    script(monkeypatch, ['{"tool":"mcp_list","arguments":{"server_id":"server"}}', 'Есть поиск.'], seen)
+    script(monkeypatch, [
+        '{"tool":"tool_search","arguments":{"query":"lookup record"}}',
+        '{"tool":"mcp_list","arguments":{"server_id":"server"}}',
+        'Есть поиск.',
+    ], seen)
     events = ndjson(google_client.post('/api/agent/react', json={'message': 'Какие инструменты доступны?', 'tools': True}))
-    assert events_of(events, 'tool')[0]['status'] == 'ok'
-    assert 'lookup_record' in str(seen[0]['tools']) and 'lookup_record' in model_text(seen, 1)
+    tools_ran = events_of(events, 'tool')
+    assert tools_ran[0]['name'] == 'tool_search' and tools_ran[0]['status'] == 'ok'
+    assert tools_ran[1]['name'] == 'mcp_list' and tools_ran[1]['status'] == 'ok'
+    assert {item['function']['name'] for item in seen[0]['tools']} == {'tool_search', 'use_tool'}
+    assert 'lookup_record' in model_text(seen, 1) and 'lookup_record' in model_text(seen, 2)
     assert 'private_write' not in str(seen)

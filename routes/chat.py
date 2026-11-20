@@ -16,7 +16,7 @@ from database import (get_chat_history, add_message, trim_messages,
                       list_chats, delete_chat, get_traces)
 from ai_providers import gemini_stream_request, gemini_request
 from ai_providers import groq_request_with_rotation
-from ai_providers import chat_completion, chat_stream, resolve_target
+from ai_providers import chat_completion, chat_stream, resolve_target, default_timeout_for
 from groq_rotation import get_groq_key, mark_groq_key_exhausted, GROQ_KEYS
 import config
 import media_generation as mg
@@ -225,11 +225,14 @@ def send():
     # Если MCP подключён, обычный чат тоже получает его tools и может
     # выполнить mcp_call перед финальным ответом.
     provider, model_name, provider_cfg = resolve_target()
+    request_timeout = max(120, default_timeout_for(provider))
+    retry_timeout = max(180, request_timeout + 60)
     if tools_allowed:
         reply, meta, _mcp_events = complete_with_mcp(
             history + [{"role": "user", "content": message}],
             system=config.system_prompt, provider=provider, model=model_name,
-            temperature=0.7, max_tokens=provider_cfg.get("max_tokens", 8192), timeout=120,
+            temperature=0.7, max_tokens=provider_cfg.get("max_tokens", 8192),
+            timeout=request_timeout,
         )
     else:
         reply, meta = None, {}
@@ -245,7 +248,7 @@ def send():
         history + [{"role": "user", "content": message}],
         system=config.system_prompt,
         temperature=0.7,
-        timeout=120,
+        timeout=request_timeout,
     )
     if reply is None:
         # Второй шанс: тот же запрос без стрима и с большим таймаутом.
@@ -253,7 +256,7 @@ def send():
             history + [{"role": "user", "content": message}],
             system=config.system_prompt,
             temperature=0.7,
-            timeout=180,
+            timeout=retry_timeout,
         )
     if reply is None:
         error = str(meta or "Провайдер не вернул ответ")
@@ -319,6 +322,8 @@ def send_stream():
     # Единый слой провайдеров: Groq / Gemini / OpenRouter / локальный llama-server /
     # встроенная офлайн-модель. Потоком идут и токены ответа, и ход рассуждений.
     provider, model, provider_cfg = resolve_target()
+    request_timeout = max(120, default_timeout_for(provider))
+    retry_timeout = max(180, request_timeout + 60)
     history_for_prompt = [m for m in _history_stream if m.get("content")]
 
     def emit(payload: dict) -> str:
@@ -334,7 +339,8 @@ def send_stream():
                 mcp_reply, mcp_meta, mcp_events = complete_with_mcp(
                     history_for_prompt + [{"role": "user", "content": message}],
                     system=config.system_prompt, provider=provider, model=model,
-                    temperature=0.7, max_tokens=provider_cfg.get("max_tokens", 8192), timeout=120,
+                    temperature=0.7, max_tokens=provider_cfg.get("max_tokens", 8192),
+                    timeout=request_timeout,
                 )
             else:
                 mcp_reply, mcp_meta, mcp_events = None, {}, []
@@ -362,7 +368,7 @@ def send_stream():
                 system=config.system_prompt,
                 temperature=0.7,
                 max_tokens=provider_cfg.get("max_tokens", 8192),
-                timeout=120,
+                timeout=request_timeout,
                 reasoning=bool(reasoning),
             ):
                 if kind == "reasoning":
@@ -386,7 +392,7 @@ def send_stream():
                     model=model,
                     system=config.system_prompt,
                     temperature=0.7,
-                    timeout=180,
+                    timeout=retry_timeout,
                 )
                 if retry:
                     full_reply = retry

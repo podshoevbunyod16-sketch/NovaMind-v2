@@ -127,8 +127,10 @@ def test_react_passes_native_schemas_and_executes_model_tool_calls(admin_client,
                         lambda *a, **k: ("groq", "mock", {"max_tokens": 2048}))
     seen = []
     answers = iter([
-        ("", {"tool_calls": [{"id": "c1", "name": "web_search",
-                               "arguments": {"query": "asyncio"}}]}),
+        ("", {"tool_calls": [{"id": "c0", "name": "tool_search",
+                               "arguments": {"query": "web search asyncio"}}]}),
+        ("", {"tool_calls": [{"id": "c1", "name": "use_tool",
+                               "arguments": {"tool": "web_search", "arguments": {"query": "asyncio"}}}]}),
         ("Нашёл документацию asyncio.", {"model": "mock"}),
     ])
 
@@ -138,8 +140,9 @@ def test_react_passes_native_schemas_and_executes_model_tool_calls(admin_client,
 
     monkeypatch.setattr(ai_providers, "chat_completion", complete)
     events = ndjson(admin_client.post("/api/agent/stream", json={"message": "найди asyncio"}))
-    assert seen and any(item["function"]["name"] == "web_search" for item in seen[0]["tools"])
-    assert events_of(events, "tool")[0]["name"] == "web_search"
+    assert seen and {item["function"]["name"] for item in seen[0]["tools"]} == {"tool_search", "use_tool"}
+    tools_ran = [t["name"] for t in events_of(events, "tool")]
+    assert tools_ran == ["tool_search", "web_search"]
     assert events_of(events, "sources")[0]["sources"][0]["url"].endswith("/asyncio")
     assert "Нашёл документацию" in answer_of(events)
 

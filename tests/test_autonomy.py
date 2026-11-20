@@ -134,11 +134,12 @@ def test_autonomous_mcp_selection_without_mentioning_mcp_and_with_random_server_
     assert mcp_policy.risk_of("mcp_call", '{"server_id":"todoist","tool":"list_active_tasks"}') == "safe"
 
     seen = []
-    # Модель передаёт человекочитаемое имя "todoist" вместо случайного "xK9_mP2q"
+    # Модель находит инструмент через tool_search и передаёт человекочитаемое имя "todoist"
     script(
         monkeypatch,
         [
-            '```mcp_call\n{"server_id": "todoist", "tool": "list_active_tasks", "arguments": {}}\n```',
+            '{"tool":"tool_search","arguments":{"query":"todoist tasks"}}',
+            '{"tool":"use_tool","arguments":{"server_id":"todoist","tool":"list_active_tasks","arguments":{}}}',
             "Ваши активные задачи в Todoist: 1) Купить молоко, 2) Проверить PR.",
         ],
         seen,
@@ -148,9 +149,11 @@ def test_autonomous_mcp_selection_without_mentioning_mcp_and_with_random_server_
         json={"message": "покажи что у меня сейчас в todoist"},
     ))
 
-    # В системном промпте есть и название сервера, и описание инструмента
+    # На первом шаге переданы только два мета-инструмента и краткое имя сервера, без раздувания каталога
+    assert {item["function"]["name"] for item in seen[0]["tools"]} == {"tool_search", "use_tool"}
+    # После tool_search модель получила описание инструмента list_active_tasks
     prompt_seen = model_text(seen)
-    assert "Todoist Tasks" in prompt_seen
+    assert "list_active_tasks" in prompt_seen
     assert "Получить активные задачи" in prompt_seen
     # Вызов автоматически разрешился в реальный server_id = "xK9_mP2q"
     assert called == [("xK9_mP2q", "list_active_tasks", {})], events

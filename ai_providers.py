@@ -600,6 +600,25 @@ def resolve_target(provider: str = None, model: str = None):
     return provider, model, cfg
 
 
+def default_timeout_for(provider: str | None = None) -> float:
+    """Per-provider default HTTP request timeout in seconds."""
+    name = str(provider or "").strip().lower()
+    if name == "openai_compatible":
+        try:
+            return max(30.0, float(os.getenv("LOCAL_LLM_TIMEOUT", "300") or 300))
+        except (TypeError, ValueError):
+            return 300.0
+    if name == "pollinations":
+        try:
+            return max(30.0, float(os.getenv("POLLINATIONS_TIMEOUT", "240") or 240))
+        except (TypeError, ValueError):
+            return 240.0
+    try:
+        return max(10.0, float(os.getenv("AI_REQUEST_TIMEOUT", "90") or 90))
+    except (TypeError, ValueError):
+        return 90.0
+
+
 FREE_TIER_PROVIDERS = frozenset({
     "groq", "cerebras", "google_ai_studio", "openai_compatible", "local_demo",
 })
@@ -727,11 +746,13 @@ def _managed_provider_request(provider, model, url, payload, headers, timeout=90
 
 def _managed_stream_request(provider, model, url, payload, headers, timeout=90):
     """Open an SSE response with same-provider key rotation before streaming starts."""
+    connect_timeout = (min(60, timeout) if provider in ("openai_compatible", "pollinations")
+                       else min(30, timeout))
     manager = provider_manager()
     if provider not in manager.provider_names():
         try:
             response = requests.post(url, json=payload, headers=headers,
-                                     timeout=(min(30, timeout), timeout), stream=True)
+                                     timeout=(connect_timeout, timeout), stream=True)
         except requests.exceptions.RequestException as exc:
             return None, f"Ошибка соединения с {provider}: {exc.__class__.__name__}"
         if response.status_code >= 400:
@@ -745,7 +766,7 @@ def _managed_stream_request(provider, model, url, payload, headers, timeout=90):
         request_headers = dict(headers or {})
         request_headers["Authorization"] = f"Bearer {key_state.key}"
         response = requests.post(url, json=payload, headers=request_headers,
-                                 timeout=(min(30, timeout), timeout), stream=True)
+                                 timeout=(connect_timeout, timeout), stream=True)
         if response.status_code >= 400:
             detail = pm.redact((response.text or "")[:600], [key_state.key])
             kind, retry_after = pm.classify_response(
@@ -835,7 +856,7 @@ def _request_local_with_fallback(provider, model, cfg, payload, timeout):
 
 
 def _chat_completion_once(messages, provider=None, model=None, system=None,
-                          temperature=0.7, max_tokens=None, timeout=90, extra=None,
+                          temperature=0.7, max_tokens=None, timeout=None, extra=None,
                           tools=None, tool_choice=None, json_mode=False,
                           json_schema=None):
     """
@@ -850,6 +871,8 @@ def _chat_completion_once(messages, provider=None, model=None, system=None,
     дописывая к системе короткую директиву под выбранный язык интерфейса.
     """
     provider, model, cfg = resolve_target(provider, model)
+    if timeout is None:
+        timeout = default_timeout_for(provider)
     system = language_policy.apply_to_system(system)
     tools_payload = openai_tools_payload(tools) if (tools and supports_native_tools(provider, model)) else []
     local_caps = {}
@@ -928,7 +951,7 @@ def _chat_completion_once(messages, provider=None, model=None, system=None,
 
 
 def chat_completion(messages, provider=None, model=None, system=None,
-                    temperature=0.7, max_tokens=None, timeout=90, extra=None,
+                    temperature=0.7, max_tokens=None, timeout=None, extra=None,
                     tools=None, tool_choice=None, json_mode=False,
                     json_schema=None):
     """Run exactly the selected free provider/model; never fail over."""
@@ -939,9 +962,10 @@ def chat_completion(messages, provider=None, model=None, system=None,
     if not targets:
         return None, "Выбранная модель платная, неизвестная или не настроена. Автоматическая замена модели отключена."
     target_provider, target_model = targets[0]
+    effective_timeout = default_timeout_for(target_provider) if timeout is None else timeout
     text, meta = _chat_completion_once(
         messages, provider=target_provider, model=target_model, system=system,
-        temperature=temperature, max_tokens=max_tokens, timeout=timeout,
+        temperature=temperature, max_tokens=max_tokens, timeout=effective_timeout,
         extra=extra, tools=tools, tool_choice=tool_choice,
         json_mode=json_mode, json_schema=json_schema,
     )
@@ -953,7 +977,7 @@ def chat_completion(messages, provider=None, model=None, system=None,
 
 
 def _chat_stream_once(messages, provider=None, model=None, system=None, temperature=0.7,
-                max_tokens=None, timeout=90, reasoning=False, reasoning_effort="low"):
+                max_tokens=None, timeout=None, reasoning=False, reasoning_effort="low"):
     """
     Потоковый ответ. Генератор кортежей (kind, text), где kind:
       "reasoning" — ход мыслей модели (если провайдер его отдаёт),
@@ -965,6 +989,8 @@ def _chat_stream_once(messages, provider=None, model=None, system=None, temperat
     выполняется короткий «план рассуждений», затем основной ответ.
     """
     provider, model, cfg = resolve_target(provider, model)
+    if timeout is None:
+        timeout = default_timeout_for(provider)
     system = language_policy.apply_to_system(system)
     want_reasoning = bool(reasoning)
 
@@ -1060,7 +1086,7 @@ def _chat_stream_once(messages, provider=None, model=None, system=None, temperat
 
 
 def chat_stream(messages, provider=None, model=None, system=None, temperature=0.7,
-                max_tokens=None, timeout=90, reasoning=False, reasoning_effort="low"):
+                max_tokens=None, timeout=None, reasoning=False, reasoning_effort="low"):
     """Stream only from the selected free provider/model; never replay elsewhere."""
     try:
         targets = free_failover_targets(provider, model)
@@ -1073,9 +1099,10 @@ def chat_stream(messages, provider=None, model=None, system=None, temperature=0.
         yield "done", ""
         return
     target_provider, target_model = targets[0]
+    effective_timeout = default_timeout_for(target_provider) if timeout is None else timeout
     for kind, chunk in _chat_stream_once(
         messages, provider=target_provider, model=target_model, system=system,
-        temperature=temperature, max_tokens=max_tokens, timeout=timeout,
+        temperature=temperature, max_tokens=max_tokens, timeout=effective_timeout,
         reasoning=reasoning, reasoning_effort=reasoning_effort,
     ):
         if kind != "done":
@@ -1474,10 +1501,11 @@ def fetch_available_models(provider, force=False):
     if headers is None:
         return []
 
+    catalog_timeout = 15 if provider in ("pollinations", "openai_compatible") else 8
     last_error = None
     for url in urls:
         try:
-            resp = requests.get(url, headers=headers, timeout=8)
+            resp = requests.get(url, headers=headers, timeout=catalog_timeout)
             resp.raise_for_status()
             if provider == "google_ai_studio":
                 raw = resp.json().get("models", [])

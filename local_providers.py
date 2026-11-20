@@ -138,7 +138,7 @@ _PRESET_ALIASES = {
 }
 
 _CATALOG_TTL = float(os.getenv("LOCAL_LLM_CATALOG_TTL", "45") or 45)
-_CATALOG_TIMEOUT = float(os.getenv("LOCAL_LLM_CATALOG_TIMEOUT", "4") or 4)
+_CATALOG_TIMEOUT = float(os.getenv("LOCAL_LLM_CATALOG_TIMEOUT", "12") or 12)
 _SHOW_CACHE: dict = {}
 _CATALOG_CACHE: dict = {}
 _LOCK = threading.Lock()
@@ -353,7 +353,7 @@ def model_capabilities(model: str, raw: dict | None = None,
     }
 
 
-def _ollama_show(root: str, model: str, timeout: float = 2.5) -> dict:
+def _ollama_show(root: str, model: str, timeout: float = 8.0) -> dict:
     """Ask Ollama for the real capability list of one model (cached)."""
     key = (root, model)
     now = time.time()
@@ -556,7 +556,7 @@ def capabilities_for(model: str, url: str | None = None) -> dict:
     return model_capabilities(model)
 
 
-def health(url: str | None = None, *, force: bool = False, timeout: float = 10) -> dict:
+def health(url: str | None = None, *, force: bool = False, timeout: float = 20) -> dict:
     """Is the local server alive and which models does it serve?"""
     base = normalize_base(url)
     started = time.time()
