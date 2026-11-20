@@ -63,8 +63,10 @@ def test_auto_mode_is_advisory_and_exposes_all_permitted_mcp_tools(admin_client,
         "message": "покажи issue", "auto_tools": True, "tools": True,
     }))
     assert events_of(events, "selection")[0]["mode"] == "advisory"
+    # Discovery mode (the route default): the model sees only the meta-tools and
+    # finds MCP tools through tool_search, so the auto selection stays advisory.
     exposed = {item["function"]["name"] for item in (seen[0]["tools"] or [])}
-    assert {"list_issues", "delete_repo", "search_docs"} <= exposed
+    assert exposed == {"tool_search", "use_tool"}
 
 
 def test_strict_mode_limits_catalogue_but_keeps_recovery_tools(admin_client, monkeypatch):
@@ -80,8 +82,7 @@ def test_strict_mode_limits_catalogue_but_keeps_recovery_tools(admin_client, mon
     assert "github" in selection["mcp_servers"]
     assert "docs" not in selection["mcp_servers"]
     exposed = {item["function"]["name"] for item in (seen[0]["tools"] or [])}
-    assert "mcp_call" in exposed and "mcp_list" in exposed
-    assert "search_docs" not in exposed
+    assert exposed == {"tool_search", "use_tool"}
     prompt = model_text(seen, 0)
     assert "Selected MCP servers/tools" in prompt
 
