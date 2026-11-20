@@ -108,6 +108,7 @@ class AgentContext:
     integration_context: str = ""
     mcp_tools: list[dict] = field(default_factory=list)
     skill_context: str = ""
+    auto_prompt: str = ""
     search_requested: bool = False
     image_source: str = ""
     tool_discovery: bool = False
