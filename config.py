@@ -154,6 +154,21 @@ PROVIDERS = {
             {"id": "deepseek/deepseek-chat-v3-0324:free", "name": "DeepSeek Chat V3 (Free)", "free": True},
         ]
     },
+    "openai": {
+        # Платный OpenAI. Работает только при OPENAI_API_KEY и OPENAI_ALLOW_PAID=1
+        # (см. ai_providers.is_free_ai_model). Адрес можно сменить: OPENAI_CLOUD_URL.
+        "url": (os.getenv("OPENAI_CLOUD_URL") or "https://api.openai.com/v1").rstrip("/") + "/chat/completions",
+        "max_tokens": 16384,
+        "headers": {
+            "Authorization": f"Bearer {os.getenv('OPENAI_API_KEY', '')}",
+            "Content-Type": "application/json",
+        },
+        "models": [
+            {"id": "gpt-4o-mini", "name": "GPT-4o mini (платный)", "free": False},
+            {"id": "gpt-4.1-mini", "name": "GPT-4.1 mini (платный)", "free": False},
+            {"id": "gpt-4.1", "name": "GPT-4.1 (платный)", "free": False},
+        ]
+    },
     "google_ai_studio": {
         "url": f"https://generativelanguage.googleapis.com/v1beta/models/{{model}}:generateContent?key={os.getenv('GOOGLE_AI_STUDIO_KEY', '')}",
         "max_tokens": 8192,
@@ -444,6 +459,7 @@ def has_credentials(provider: str) -> bool:
         "groq": ("GROQ_API_KEY",),
         "cerebras": ("CEREBRAS_API_KEY",),
         "openrouter": ("OPENROUTER_API_KEY",),
+        "openai": ("OPENAI_API_KEY",),
         "google_ai_studio": ("GEMINI_API_KEY", "GOOGLE_AI_STUDIO_KEY"),
         "pollinations": ("POLLINATIONS_API_KEY", "POLLINATIONS_KEY", "POLLINATIONS_TOKEN"),
     }
