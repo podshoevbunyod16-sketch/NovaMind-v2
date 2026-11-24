@@ -469,7 +469,7 @@ REASONING_MODELS_HINT = ("gpt-oss", "deepseek-r1", "qwen-3", "glm-4.5", "o1", "o
 # возвращают `message.tool_calls`. Для Gemini (google_ai_studio) аргументы
 # конвертируются в functionDeclarations внутри gemini_request.
 NATIVE_TOOL_PROVIDERS = {"groq", "cerebras", "openrouter", "pollinations",
-                         "openai_compatible", "google_ai_studio"}
+                         "openai_compatible", "google_ai_studio", "openai"}
 
 
 def supports_native_tools(provider: str | None = None, model: str | None = None) -> bool:
@@ -619,6 +619,8 @@ def default_timeout_for(provider: str | None = None) -> float:
         return 90.0
 
 
+# Модели OpenAI, которые NovaMind разрешает (только если OPENAI_ALLOW_PAID=1).
+OPENAI_CHAT_ALLOWLIST = frozenset({"gpt-4o-mini", "gpt-4.1-mini", "gpt-4.1"})
 FREE_TIER_PROVIDERS = frozenset({
     "groq", "cerebras", "google_ai_studio", "openai_compatible", "local_demo",
 })
@@ -646,6 +648,12 @@ def is_free_ai_model(provider: str, model: str, entry: dict | None = None) -> bo
         except Exception:
             allowed = set()
         return model_id in allowed
+    if provider == "openai":
+        # OpenAI платный: модели видны и используются только при явном
+        # OPENAI_ALLOW_PAID=1 (оплачивает владелец ключа).
+        if os.getenv("OPENAI_ALLOW_PAID", "0").strip() != "1":
+            return False
+        return model_id in OPENAI_CHAT_ALLOWLIST
     if provider in FREE_TIER_PROVIDERS:
         return True
     if model_id.endswith(":free"):
@@ -1297,6 +1305,7 @@ PROVIDER_LABELS = {
     "groq":             "Groq",
     "cerebras":         "Cerebras",
     "openrouter":       "OpenRouter",
+    "openai":           "OpenAI (платный)",
     "google_ai_studio": "Google AI Studio",
     "openai_compatible":"OpenAI-compatible / Local",
     "pollinations":       "Pollinations.ai",
@@ -1374,6 +1383,9 @@ def provider_api_headers(provider):
         if key:
             headers["Authorization"] = f"Bearer {key}"
         return headers
+    if provider == "openai":
+        key = os.getenv("OPENAI_API_KEY", "").strip()
+        return {"Authorization": f"Bearer {key}", "Content-Type": "application/json"} if key else None
     key = _catalog_api_key(provider) or os.getenv("OPENAI_COMPATIBLE_KEY") or os.getenv("OPENAI_API_KEY") or "ollama"
     return {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
 
@@ -1468,6 +1480,11 @@ def fetch_available_models(provider, force=False):
             MODEL_ERRORS[provider] = "GEMINI_API_KEY / GOOGLE_AI_STUDIO_KEY не найден (проверьте также суффиксы _1…_9)"
             return []
         urls = ["https://generativelanguage.googleapis.com/v1beta/models"]
+    elif provider == "openai":
+        if not has_credentials(provider):
+            MODEL_ERRORS[provider] = "OPENAI_API_KEY не найден в .env"
+            return []
+        urls = ["https://api.openai.com/v1/models"]
     elif provider == "groq":
         urls = ["https://api.groq.com/openai/v1/models"]
     elif provider == "cerebras":
