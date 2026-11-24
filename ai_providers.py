@@ -1539,7 +1539,6 @@ def fetch_available_models(provider, force=False):
                             "name": m.get("displayName") or mid,
                             "description": m.get("description", ""),
                             "context_length": m.get("inputTokenLimit", 0),
-                            "pricing": {"prompt": "0", "completion": "0"},
                         }, provider))
             else:
                 raw = resp.json().get("data", resp.json().get("models", []))
@@ -1564,8 +1563,13 @@ def fetch_available_models(provider, force=False):
 
             # NovaMind text chat is free-only: paid/unknown cloud models are
             # neither shown in settings nor eligible for failover.
-            models = [item for item in models
-                      if is_free_ai_model(provider, item.get("id", ""), item)]
+            # GOOGLE_SHOW_ALL_MODELS=1: показывать все модели Google, доступные
+            # этому ключу (платные помечаются как paid, цены Google по API не отдаёт).
+            show_all_google = (provider == "google_ai_studio"
+                               and os.getenv("GOOGLE_SHOW_ALL_MODELS", "0").strip() == "1")
+            if not show_all_google:
+                models = [item for item in models
+                          if is_free_ai_model(provider, item.get("id", ""), item)]
             if models:
                 MODEL_CACHE[provider] = models
                 MODEL_ERRORS.pop(provider, None)
