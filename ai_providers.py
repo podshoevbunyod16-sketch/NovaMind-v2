@@ -647,6 +647,10 @@ def is_free_ai_model(provider: str, model: str, entry: dict | None = None) -> bo
                        if item.get("free") is True}
         except Exception:
             allowed = set()
+        # Дополнительные бесплатные модели Google из .env (через запятую),
+        # если Google выпустил новые Flash-модели раньше обновления config.py.
+        allowed |= {m.strip().lower().removeprefix("models/")
+                    for m in os.getenv("GOOGLE_EXTRA_FREE_MODELS", "").split(",") if m.strip()}
         return model_id in allowed
     if provider == "openai":
         # OpenAI платный: модели видны и используются только при явном
