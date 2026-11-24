@@ -2,6 +2,7 @@
 routes/settings.py — Настройки провайдеров и моделей
 """
 from flask import Blueprint, request, jsonify, render_template, session
+import os
 import zipfile
 from ai_providers import fetch_available_models, provider_status, PROVIDER_LABELS, MODEL_ERRORS, media_models_catalog
 from config import PROVIDERS, save_selected_model, current_provider, current_model, GOOGLE_CLIENT_ID
@@ -19,6 +20,11 @@ OPEN_ENDPOINTS = {
 }
 
 
+def _settings_open_to_all():
+    """SETTINGS_OPEN_TO_ALL=1 в .env открывает панель настроек всем посетителям."""
+    return os.getenv("SETTINGS_OPEN_TO_ALL", "0") == "1"
+
+
 @settings_bp.before_request
 def _panel_admin_only():
     """Панель настроек — только администратору.
@@ -28,7 +34,7 @@ def _panel_admin_only():
     Теперь страница и её API закрыты, а интерфейс прячет вход (см. app.js).
     """
     from routes.terminal import is_admin
-    if is_admin() or request.endpoint in OPEN_ENDPOINTS:
+    if is_admin() or request.endpoint in OPEN_ENDPOINTS or _settings_open_to_all():
         return None
     if request.path.startswith("/api/"):
         return jsonify({"error": "Настройки доступны только администратору",
