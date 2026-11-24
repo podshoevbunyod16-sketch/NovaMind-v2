@@ -123,6 +123,7 @@ def settings_skill_delete(skill_id):
 
 PROVIDER_HINTS = {
     "groq": "Бесплатный тариф, нужен GROQ_API_KEY",
+    "openai": "Платный: нужен OPENAI_API_KEY и OPENAI_ALLOW_PAID=1",
     "cerebras": "Нужен CEREBRAS_API_KEY",
     "openrouter": "Нужен OPENROUTER_API_KEY",
     "google_ai_studio": "Нужен GEMINI_API_KEY",
