@@ -177,6 +177,9 @@ PROVIDERS = {
         },
         "models": [
             {"id": "gemini-3.8-flash", "name": "Gemini 3.8 Flash (free tier)", "free": True},
+            {"id": "gemini-3.6-flash", "name": "Gemini 3.6 Flash (free tier)", "free": True},
+            {"id": "gemini-3.5-flash-lite", "name": "Gemini 3.5 Flash-Lite (free tier)", "free": True},
+            {"id": "gemini-3.1-flash-lite", "name": "Gemini 3.1 Flash-Lite (free tier)", "free": True},
         ]
     },
     "pollinations": {
